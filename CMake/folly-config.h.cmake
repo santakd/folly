@@ -42,7 +42,6 @@
 #include <features.h>
 #endif
 
-#cmakedefine FOLLY_HAVE_MEMRCHR 1
 #cmakedefine FOLLY_HAVE_ACCEPT4 1
 #cmakedefine01 FOLLY_HAVE_GETRANDOM
 #cmakedefine FOLLY_HAVE_PREADV 1
@@ -67,6 +66,11 @@
 #cmakedefine FOLLY_USE_LIBCPP 1
 #cmakedefine HAVE_VSNPRINTF_ERRORS 1
 
+#cmakedefine FOLLY_HAVE_LIBUNWIND 1
+#cmakedefine FOLLY_HAVE_DWARF 1
+#cmakedefine FOLLY_HAVE_ELF 1
+#cmakedefine FOLLY_HAVE_SWAPCONTEXT 1
+#cmakedefine FOLLY_HAVE_BACKTRACE 1
 #cmakedefine FOLLY_USE_SYMBOLIZER 1
 #define FOLLY_DEMANGLE_MAX_SYMBOL_SIZE 1024
 

@@ -14,6 +14,11 @@
  * limitations under the License.
  */
 
+#pragma once
+
+#include <algorithm>
+#include <vector>
+
 #include <folly/Traits.h>
 #include <folly/Try.h>
 #include <folly/fibers/FiberManager.h>
@@ -22,10 +27,6 @@
 #include <folly/fibers/async/FiberManager.h>
 #include <folly/fibers/async/Future.h>
 #include <folly/functional/Invoke.h>
-
-#include <algorithm>
-#include <vector>
-#pragma once
 
 namespace folly {
 namespace fibers {
@@ -79,7 +80,7 @@ Async<std::tuple<lift_unit_t<async_invocable_inner_type_t<Ts>>...>> collectAll(
     Ts&&... tasks) {
   auto future = folly::collectAllUnsafe(addFiberFuture(
       std::forward<Ts>(tasks), FiberManager::getFiberManager())...);
-  auto tuple = await(futureWait(std::move(future)));
+  auto tuple = await_async(futureWait(std::move(future)));
   return Async(folly::unwrapTryTuple(std::move(tuple)));
 }
 
@@ -102,8 +103,7 @@ Async<async_invocable_inner_type_t<F>> executeOnNewFiber(F&& func) {
  */
 template <typename F>
 Async<async_invocable_inner_type_t<F>> executeOnRemoteFiber(
-    F&& func,
-    FiberManager& fm) {
+    F&& func, FiberManager& fm) {
   DCHECK(detail::onFiber());
   return futureWait(addFiberRemoteFuture(std::forward<F>(func), fm));
 }

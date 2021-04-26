@@ -16,9 +16,12 @@
 
 #pragma once
 
+#include <folly/experimental/coro/Coroutine.h>
 #include <folly/experimental/coro/Invoke.h>
 #include <folly/experimental/coro/Task.h>
 #include <folly/experimental/coro/Traits.h>
+
+#if FOLLY_HAS_COROUTINES
 
 namespace folly {
 namespace coro {
@@ -40,6 +43,16 @@ Task<semi_await_result_t<SemiAwaitable>> toTask(
         co_return co_await a.get();
       });
 }
+inline Task<void> toTask(Future<Unit> a) {
+  return co_invoke([a = std::move(a)]() mutable -> Task<void> {
+    co_yield co_result(co_await co_awaitTry(std::move(a)));
+  });
+}
+inline Task<void> toTask(SemiFuture<Unit> a) {
+  return co_invoke([a = std::move(a)]() mutable -> Task<void> {
+    co_yield co_result(co_await co_awaitTry(std::move(a)));
+  });
+}
 
 // Converts the given SemiAwaitable to a SemiFuture (without starting it)
 template <typename SemiAwaitable>
@@ -59,3 +72,5 @@ toFuture(SemiAwaitable&& a, Executor::KeepAlive<> ex) {
 
 } // namespace coro
 } // namespace folly
+
+#endif // FOLLY_HAS_COROUTINES

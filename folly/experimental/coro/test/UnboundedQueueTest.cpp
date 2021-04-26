@@ -16,8 +16,6 @@
 
 #include <folly/Portability.h>
 
-#if FOLLY_HAS_COROUTINES
-
 #include <folly/CancellationToken.h>
 #include <folly/experimental/coro/BlockingWait.h>
 #include <folly/experimental/coro/Collect.h>
@@ -27,6 +25,8 @@
 
 #include <string>
 #include <thread>
+
+#if FOLLY_HAS_COROUTINES
 
 TEST(UnboundedQueueTest, EnqueueDeque) {
   folly::coro::UnboundedQueue<std::string, true, true> queue;
@@ -188,6 +188,24 @@ TEST(UnboundedQueueTest, CancelledDequeueCompletesNormallyIfAnItemIsAvailable) {
         cancelSource.getToken(), queue.dequeue());
     EXPECT_EQ(123, result);
   }());
+}
+
+TEST(UnboundedQueueTest, TryDequeue) {
+  folly::coro::UnboundedQueue<int> queue;
+
+  queue.enqueue(42);
+  EXPECT_EQ(42, queue.try_dequeue());
+
+  folly::ManualExecutor ex;
+
+  auto fut = queue.dequeue().scheduleOn(&ex).start();
+  ex.drain();
+  EXPECT_FALSE(fut.isReady());
+
+  queue.enqueue(13);
+  ex.drain();
+  EXPECT_TRUE(fut.isReady());
+  EXPECT_EQ(std::move(fut).get(), 13);
 }
 
 #endif

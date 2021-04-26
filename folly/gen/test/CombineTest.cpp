@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <folly/gen/Combine.h>
+
 #include <memory>
 #include <string>
 #include <tuple>
@@ -24,7 +26,6 @@
 #include <folly/FBVector.h>
 #include <folly/Range.h>
 #include <folly/gen/Base.h>
-#include <folly/gen/Combine.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
 
@@ -205,10 +206,4 @@ TEST(CombineGen, TupleFlatten) {
   // clang-format on
   ASSERT_EQ(zipped6.size(), 3);
   EXPECT_EQ(zipped6[0], std::make_tuple(1, "1", 'A', 1.0));
-}
-
-int main(int argc, char* argv[]) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  return RUN_ALL_TESTS();
 }

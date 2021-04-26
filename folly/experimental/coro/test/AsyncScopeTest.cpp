@@ -16,8 +16,6 @@
 
 #include <folly/Portability.h>
 
-#if FOLLY_HAS_COROUTINES
-
 #include <folly/experimental/coro/AsyncScope.h>
 
 #include <folly/executors/GlobalExecutor.h>
@@ -27,6 +25,8 @@
 #include <folly/experimental/coro/Task.h>
 
 #include <folly/portability/GTest.h>
+
+#if FOLLY_HAS_COROUTINES
 
 struct AsyncScopeTest : public testing::Test {};
 
@@ -80,6 +80,32 @@ TEST_F(AsyncScopeTest, StartChildTasksAfterCleanupStarted) {
         }());
 
     CHECK(childFinished);
+  }());
+}
+
+TEST_F(AsyncScopeTest, QueryRemainingCount) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<> {
+    folly::coro::Baton baton;
+
+    auto makeTask = [&]() -> folly::coro::Task<> { co_await baton; };
+
+    auto executor = co_await folly::coro::co_current_executor;
+
+    folly::coro::AsyncScope scope;
+
+    CHECK_EQ(0, scope.remaining());
+
+    for (int i = 0; i < 10; ++i) {
+      scope.add(makeTask().scheduleOn(executor));
+    }
+
+    CHECK_EQ(10, scope.remaining());
+
+    baton.post();
+
+    co_await scope.joinAsync();
+
+    CHECK_EQ(0, scope.remaining());
   }());
 }
 

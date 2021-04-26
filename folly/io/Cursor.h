@@ -96,8 +96,7 @@ class CursorBase {
 
   template <class OtherDerived, class OtherBuf>
   explicit CursorBase(
-      const CursorBase<OtherDerived, OtherBuf>& cursor,
-      size_t len)
+      const CursorBase<OtherDerived, OtherBuf>& cursor, size_t len)
       : crtBuf_(cursor.crtBuf_),
         buffer_(cursor.buffer_),
         crtBegin_(cursor.crtBegin_),
@@ -299,9 +298,7 @@ class CursorBase {
     }
     return (crtPos == crtPosOther) && (crtBuf == crtBufOther);
   }
-  bool operator!=(const Derived& other) const {
-    return !operator==(other);
-  }
+  bool operator!=(const Derived& other) const { return !operator==(other); }
 
   template <class T>
   typename std::enable_if<std::is_arithmetic<T>::value, bool>::type tryRead(
@@ -635,9 +632,7 @@ class CursorBase {
 
   ~CursorBase() {}
 
-  BufType* head() {
-    return buffer_;
-  }
+  BufType* head() { return buffer_; }
 
   bool tryAdvanceBuffer() {
     BufType* nextBuf = crtBuf_->next();
@@ -695,13 +690,9 @@ class CursorBase {
   size_t remainingLen_{std::numeric_limits<size_t>::max()};
 
  private:
-  Derived& derived() {
-    return static_cast<Derived&>(*this);
-  }
+  Derived& derived() { return static_cast<Derived&>(*this); }
 
-  Derived const& derived() const {
-    return static_cast<const Derived&>(*this);
-  }
+  Derived const& derived() const { return static_cast<const Derived&>(*this); }
 
   template <class T>
   FOLLY_NOINLINE T readSlow() {
@@ -906,6 +897,9 @@ class RWCursor : public detail::CursorBase<RWCursor<access>, IOBuf>,
   explicit RWCursor(IOBuf* buf)
       : detail::CursorBase<RWCursor<access>, IOBuf>(buf), maybeShared_(true) {}
 
+  explicit RWCursor(IOBufQueue& queue)
+      : RWCursor((queue.flushCache(), queue.head_.get())) {}
+
   template <class OtherDerived, class OtherBuf>
   explicit RWCursor(const detail::CursorBase<OtherDerived, OtherBuf>& cursor)
       : detail::CursorBase<RWCursor<access>, IOBuf>(cursor),
@@ -1037,9 +1031,7 @@ class RWCursor : public detail::CursorBase<RWCursor<access>, IOBuf>,
     }
   }
 
-  void advanceDone() {
-    maybeShared_ = true;
-  }
+  void advanceDone() { maybeShared_ = true; }
 
   bool maybeShared_;
 };
@@ -1060,21 +1052,15 @@ class Appender : public detail::Writable<Appender> {
   Appender(IOBuf* buf, std::size_t growth)
       : buffer_(buf), crtBuf_(buf->prev()), growth_(growth) {}
 
-  uint8_t* writableData() {
-    return crtBuf_->writableTail();
-  }
+  uint8_t* writableData() { return crtBuf_->writableTail(); }
 
-  size_t length() const {
-    return crtBuf_->tailroom();
-  }
+  size_t length() const { return crtBuf_->tailroom(); }
 
   /**
    * Mark n bytes (must be <= length()) as appended, as per the
    * IOBuf::append() method.
    */
-  void append(size_t n) {
-    crtBuf_->append(n);
-  }
+  void append(size_t n) { crtBuf_->append(n); }
 
   /**
    * Ensure at least n contiguous bytes available to write.
@@ -1166,9 +1152,7 @@ class Appender : public detail::Writable<Appender> {
    * piece.  This allows Appender objects to be used directly with
    * Formatter.
    */
-  void operator()(StringPiece sp) {
-    push(ByteRange(sp));
-  }
+  void operator()(StringPiece sp) { push(ByteRange(sp)); }
 
  private:
   bool tryGrowChain() {
@@ -1202,17 +1186,11 @@ class QueueAppender : public detail::Writable<QueueAppender> {
     growth_ = growth;
   }
 
-  uint8_t* writableData() {
-    return queueCache_.writableData();
-  }
+  uint8_t* writableData() { return queueCache_.writableData(); }
 
-  size_t length() {
-    return queueCache_.length();
-  }
+  size_t length() { return queueCache_.length(); }
 
-  void append(size_t n) {
-    queueCache_.append(n);
-  }
+  void append(size_t n) { queueCache_.append(n); }
 
   // Ensure at least n contiguous; can go above growth_, throws if
   // not enough room.
@@ -1263,6 +1241,11 @@ class QueueAppender : public detail::Writable<QueueAppender> {
 
   void insert(const folly::IOBuf& buf) {
     queueCache_.queue()->append(buf, true);
+  }
+
+  template <CursorAccess access>
+  explicit operator RWCursor<access>() {
+    return RWCursor<access>(*queueCache_.queue());
   }
 
  private:

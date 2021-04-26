@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <folly/experimental/coro/Coroutine.h>
 #include <folly/experimental/coro/Task.h>
 #include <folly/experimental/coro/detail/Barrier.h>
 #include <folly/experimental/coro/detail/BarrierTask.h>
@@ -25,6 +26,8 @@
 
 #include <atomic>
 #include <cassert>
+
+#if FOLLY_HAS_COROUTINES
 
 namespace folly {
 namespace coro {
@@ -62,6 +65,9 @@ class AsyncScope {
   // call either cleanup() or joinAsync() and wait until the that operation
   // completes before calling the destructor.
   ~AsyncScope();
+
+  // Query the number of tasks added to the scope that have not yet completed.
+  std::size_t remaining() const noexcept;
 
   // Start the specified task/awaitable by co_awaiting it.
   //
@@ -120,12 +126,11 @@ class AsyncScope {
 
     try {
       co_await std::move(awaitable);
-    } catch (const std::exception& e) {
+    } catch (const OperationCancelled&) {
+    } catch (...) {
       LOG(DFATAL)
           << "Unhandled exception thrown from task added to AsyncScope: "
-          << e.what();
-    } catch (...) {
-      LOG(DFATAL) << "Unhandled exception thrown from task added to AsyncScope";
+          << folly::exceptionStr(std::current_exception());
     }
   }
 
@@ -141,13 +146,19 @@ inline AsyncScope::~AsyncScope() {
       "cleanup() not yet complete");
 }
 
+inline std::size_t AsyncScope::remaining() const noexcept {
+  const std::size_t count = barrier_.remaining();
+  return count > 1 ? (count - 1) : 0;
+}
+
 template <typename Awaitable>
-inline void AsyncScope::add(Awaitable&& awaitable) {
+FOLLY_NOINLINE inline void AsyncScope::add(Awaitable&& awaitable) {
   assert(
       !joined_ &&
       "It is invalid to add() more work after work has been joined");
   anyTasksStarted_.store(true, std::memory_order_relaxed);
-  addImpl((Awaitable &&) awaitable).start(&barrier_);
+  addImpl((Awaitable &&) awaitable)
+      .start(&barrier_, FOLLY_ASYNC_STACK_RETURN_ADDRESS());
 }
 
 inline Task<void> AsyncScope::joinAsync() noexcept {
@@ -163,3 +174,5 @@ inline folly::SemiFuture<folly::Unit> AsyncScope::cleanup() noexcept {
 
 } // namespace coro
 } // namespace folly
+
+#endif // FOLLY_HAS_COROUTINES

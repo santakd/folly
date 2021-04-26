@@ -15,19 +15,19 @@
  */
 
 #include <folly/synchronization/Hazptr.h>
-#include <folly/synchronization/example/HazptrLockFreeLIFO.h>
-#include <folly/synchronization/example/HazptrSWMRSet.h>
-#include <folly/synchronization/example/HazptrWideCAS.h>
-#include <folly/synchronization/test/Barrier.h>
+
+#include <atomic>
+#include <thread>
 
 #include <folly/Singleton.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
 #include <folly/synchronization/HazptrThreadPoolExecutor.h>
+#include <folly/synchronization/example/HazptrLockFreeLIFO.h>
+#include <folly/synchronization/example/HazptrSWMRSet.h>
+#include <folly/synchronization/example/HazptrWideCAS.h>
+#include <folly/synchronization/test/Barrier.h>
 #include <folly/test/DeterministicSchedule.h>
-
-#include <atomic>
-#include <thread>
 
 DEFINE_bool(bench, false, "run benchmark");
 DEFINE_int64(num_reps, 10, "Number of test reps");
@@ -69,29 +69,17 @@ class Count {
     retires_.store(0);
   }
 
-  int ctors() const noexcept {
-    return ctors_.load();
-  }
+  int ctors() const noexcept { return ctors_.load(); }
 
-  int dtors() const noexcept {
-    return dtors_.load();
-  }
+  int dtors() const noexcept { return dtors_.load(); }
 
-  int retires() const noexcept {
-    return retires_.load();
-  }
+  int retires() const noexcept { return retires_.load(); }
 
-  void inc_ctors() noexcept {
-    ctors_.fetch_add(1);
-  }
+  void inc_ctors() noexcept { ctors_.fetch_add(1); }
 
-  void inc_dtors() noexcept {
-    dtors_.fetch_add(1);
-  }
+  void inc_dtors() noexcept { dtors_.fetch_add(1); }
 
-  void inc_retires() noexcept {
-    retires_.fetch_add(1);
-  }
+  void inc_retires() noexcept { retires_.fetch_add(1); }
 }; // Count
 
 static Count c_;
@@ -108,21 +96,15 @@ class Node : public hazptr_obj_base<Node<Atom>, Atom> {
     c_.inc_ctors();
   }
 
-  ~Node() {
-    c_.inc_dtors();
-  }
+  ~Node() { c_.inc_dtors(); }
 
-  int value() const noexcept {
-    return val_;
-  }
+  int value() const noexcept { return val_; }
 
   Node<Atom>* next() const noexcept {
     return next_.load(std::memory_order_acquire);
   }
 
-  Atom<Node<Atom>*>* ptr_next() noexcept {
-    return &next_;
-  }
+  Atom<Node<Atom>*>* ptr_next() noexcept { return &next_; }
 }; // Node
 
 /** NodeRC */
@@ -145,13 +127,9 @@ class NodeRC : public hazptr_obj_base_linked<NodeRC<Mutable, Atom>, Atom> {
     }
   }
 
-  ~NodeRC() {
-    c_.inc_dtors();
-  }
+  ~NodeRC() { c_.inc_dtors(); }
 
-  int value() const noexcept {
-    return val_;
-  }
+  int value() const noexcept { return val_; }
 
   NodeRC<Mutable, Atom>* next() const noexcept {
     return next_.load(std::memory_order_acquire);
@@ -193,9 +171,7 @@ struct List {
   }
 
   bool hand_over_hand(
-      int val,
-      hazptr_holder<Atom>* hptr_prev,
-      hazptr_holder<Atom>* hptr_curr) {
+      int val, hazptr_holder<Atom>* hptr_prev, hazptr_holder<Atom>* hptr_curr) {
     while (true) {
       auto prev = &head_;
       auto curr = prev->load(std::memory_order_acquire);
@@ -256,9 +232,7 @@ class NodeAuto : public hazptr_obj_base_linked<NodeAuto<Atom>, Atom> {
     c_.inc_ctors();
   }
 
-  ~NodeAuto() {
-    c_.inc_dtors();
-  }
+  ~NodeAuto() { c_.inc_dtors(); }
 
   NodeAuto<Atom>* link(size_t i) {
     return link_[i].load(std::memory_order_acquire);
@@ -709,9 +683,7 @@ void free_function_retire_test() {
     struct delret {
       bool* retired_;
       explicit delret(bool* retire) : retired_(retire) {}
-      ~delret() {
-        *retired_ = true;
-      }
+      ~delret() { *retired_ = true; }
     };
     auto foo3 = new delret(&retired);
     myDomain0.retire(foo3);
@@ -867,9 +839,7 @@ void recursive_destruction_test() {
       }
       foo_ = foo;
     }
-    hazptr_obj_cohort<Atom>* cohort() {
-      return &cohort_;
-    }
+    hazptr_obj_cohort<Atom>* cohort() { return &cohort_; }
   };
 
   int num1 = 101;
@@ -1258,10 +1228,7 @@ TEST(HazptrTest, reclamation_without_calling_cleanup) {
 
 template <typename InitFunc, typename Func, typename EndFunc>
 uint64_t run_once(
-    int nthreads,
-    const InitFunc& init,
-    const Func& fn,
-    const EndFunc& endFn) {
+    int nthreads, const InitFunc& init, const Func& fn, const EndFunc& endFn) {
   std::atomic<bool> start{false};
   Barrier b(nthreads + 1);
   init();
@@ -1380,10 +1347,7 @@ inline uint64_t obj_bench(std::string name, int nthreads) {
 }
 
 uint64_t list_hoh_bench(
-    std::string name,
-    int nthreads,
-    int size,
-    bool provided = false) {
+    std::string name, int nthreads, int size, bool provided = false) {
   auto repFn = [&] {
     List<Node<>> l(size);
     auto init = [&] {};
@@ -1406,10 +1370,7 @@ uint64_t list_hoh_bench(
 }
 
 uint64_t list_protect_all_bench(
-    std::string name,
-    int nthreads,
-    int size,
-    bool provided = false) {
+    std::string name, int nthreads, int size, bool provided = false) {
   auto repFn = [&] {
     List<NodeRC<true>> l(size);
     auto init = [] {};

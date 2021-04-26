@@ -43,30 +43,13 @@ class AsyncioExecutor : public DrivableExecutor, public SequencedExecutor {
     }
   }
 
-  void add(Func func) override {
-    queue_.putMessage(std::move(func));
-  }
+  void add(Func func) override { queue_.putMessage(std::move(func)); }
 
-  int fileno() const {
-    return consumer_.getFd();
-  }
+  int fileno() const { return consumer_.getFd(); }
 
-  void drive() noexcept override {
-    consumer_.consumeUntilDrained([](Func&& func) {
-      if (FOLLY_DETAIL_PY_ISFINALIZING()) {
-        // if Python is finalizing calling scheduled functions MAY segfault.
-        // any code that could have been called is now inconsequential.
-        return;
-      }
-      try {
-        func();
-      } catch (...) {
-        LOG(ERROR) << "Exception thrown by NotificationQueueExecutor task."
-                   << "Exception message: "
-                   << folly::exceptionStr(std::current_exception());
-      }
-    });
-  }
+  void drive() noexcept override { driveImpl(/* canDiscard = */ true); }
+
+  void driveNoDiscard() noexcept { driveImpl(/* canDiscard = */ false); }
 
  protected:
   bool keepAliveAcquire() noexcept override {
@@ -83,6 +66,23 @@ class AsyncioExecutor : public DrivableExecutor, public SequencedExecutor {
   }
 
  private:
+  void driveImpl(bool canDiscard) noexcept {
+    consumer_.consume([&](Func&& func) {
+      if (canDiscard && FOLLY_DETAIL_PY_ISFINALIZING()) {
+        // if Python is finalizing calling scheduled functions MAY segfault.
+        // any code that could have been called is now inconsequential.
+        return;
+      }
+      try {
+        func();
+      } catch (...) {
+        LOG(ERROR) << "Exception thrown by NotificationQueueExecutor task."
+                   << "Exception message: "
+                   << folly::exceptionStr(std::current_exception());
+      }
+    });
+  }
+
   folly::NotificationQueue<Func> queue_;
   folly::NotificationQueue<Func>::SimpleConsumer consumer_{queue_};
   std::atomic<size_t> keepAliveCounter_{1};

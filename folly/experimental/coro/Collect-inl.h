@@ -15,10 +15,15 @@
  */
 
 #include <folly/ExceptionWrapper.h>
+#include <folly/experimental/coro/AsyncPipe.h>
+#include <folly/experimental/coro/AsyncScope.h>
 #include <folly/experimental/coro/Mutex.h>
 #include <folly/experimental/coro/detail/Barrier.h>
 #include <folly/experimental/coro/detail/BarrierTask.h>
+#include <folly/experimental/coro/detail/CurrentAsyncFrame.h>
 #include <folly/experimental/coro/detail/Helpers.h>
+
+#if FOLLY_HAS_COROUTINES
 
 namespace folly {
 namespace coro {
@@ -63,8 +68,7 @@ BarrierTask makeCollectAllTryTask(
 
 template <typename... SemiAwaitables, size_t... Indices>
 auto collectAllTryImpl(
-    std::index_sequence<Indices...>,
-    SemiAwaitables... awaitables)
+    std::index_sequence<Indices...>, SemiAwaitables... awaitables)
     -> folly::coro::Task<
         std::tuple<collect_all_try_component_t<SemiAwaitables>...>> {
   static_assert(sizeof...(Indices) == sizeof...(SemiAwaitables));
@@ -87,6 +91,8 @@ auto collectAllTryImpl(
 
     folly::coro::detail::Barrier barrier{sizeof...(SemiAwaitables) + 1};
 
+    auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
     // Use std::initializer_list to ensure that the sub-tasks are launched
     // in the order they appear in the parameter pack.
 
@@ -96,7 +102,7 @@ auto collectAllTryImpl(
     // context.
     const auto context = RequestContext::saveContext();
     (void)std::initializer_list<int>{
-        (tasks[Indices].start(&barrier),
+        (tasks[Indices].start(&barrier, asyncFrame),
          RequestContext::setContext(context),
          0)...};
 
@@ -113,8 +119,7 @@ auto collectAllTryImpl(
 
 template <typename... SemiAwaitables, size_t... Indices>
 auto collectAllImpl(
-    std::index_sequence<Indices...>,
-    SemiAwaitables... awaitables)
+    std::index_sequence<Indices...>, SemiAwaitables... awaitables)
     -> folly::coro::Task<
         std::tuple<collect_all_component_t<SemiAwaitables>...>> {
   if constexpr (sizeof...(SemiAwaitables) == 0) {
@@ -179,10 +184,12 @@ auto collectAllImpl(
     // context.
     const auto context = RequestContext::saveContext();
 
+    auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
     // Use std::initializer_list to ensure that the sub-tasks are launched
     // in the order they appear in the parameter pack.
     (void)std::initializer_list<int>{
-        (tasks[Indices].start(&barrier),
+        (tasks[Indices].start(&barrier, asyncFrame),
          RequestContext::setContext(context),
          0)...};
 
@@ -201,12 +208,80 @@ auto collectAllImpl(
       // Parent task was cancelled before any child tasks failed.
       // Complete with the OperationCancelled error instead of the
       // child task's errors.
-      co_yield co_error(OperationCancelled{});
+      co_yield co_cancelled;
     }
 
     co_return std::tuple<collect_all_component_t<SemiAwaitables>...>{
         getValueOrUnit(std::get<Indices>(std::move(results)))...};
   }
+}
+
+template <typename InputRange, typename IsTry>
+auto makeUnorderedAsyncGeneratorFromAwaitableRangeImpl(
+    AsyncScope& scope, InputRange awaitables, IsTry) {
+  using Item =
+      async_generator_from_awaitable_range_item_t<InputRange, IsTry::value>;
+  return [](AsyncScope& scopeParam,
+            InputRange awaitablesParam) -> AsyncGenerator<Item&&> {
+    auto [results, pipe] = AsyncPipe<Item, false>::create();
+    const CancellationSource cancelSource;
+    auto guard = folly::makeGuard([&] { cancelSource.requestCancellation(); });
+    auto ex = co_await co_current_executor;
+    size_t expected = 0;
+    // Save the initial context and restore it after starting each task
+    // as the task may have modified the context before suspending and we
+    // want to make sure the next task is started with the same initial
+    // context.
+    const auto context = RequestContext::saveContext();
+
+    for (auto&& semiAwaitable : static_cast<InputRange&&>(awaitablesParam)) {
+      scopeParam.add(
+          [](auto semiAwaitableParam,
+             auto& cancelSourceParam,
+             auto& p) -> Task<void> {
+            auto result = co_await co_withCancellation(
+                cancelSourceParam.getToken(),
+                co_awaitTry(std::move(semiAwaitableParam)));
+            if (!result.hasValue() && !IsTry::value) {
+              cancelSourceParam.requestCancellation();
+            }
+            p.write(std::move(result));
+          }(static_cast<decltype(semiAwaitable)&&>(semiAwaitable),
+            cancelSource,
+            pipe)
+                             .scheduleOn(ex));
+      ++expected;
+      RequestContext::setContext(context);
+    }
+
+    while (true) {
+      CancellationCallback cancelCallback(
+          co_await co_current_cancellation_token,
+          [&]() noexcept { cancelSource.requestCancellation(); });
+
+      if constexpr (!IsTry::value) {
+        auto result = co_await co_awaitTry(results.next());
+        if (result.hasValue()) {
+          co_yield std::move(*result);
+          if (--expected) {
+            continue;
+          }
+          result = {}; // completion result
+        }
+        guard.dismiss();
+        co_yield co_result(std::move(result));
+      } else {
+        // Prevent AsyncPipe from receiving cancellation so we get the right
+        // number of OperationCancelleds.
+        auto result = co_await co_withCancellation({}, results.next());
+        co_yield std::move(*result);
+        if (--expected == 0) {
+          guard.dismiss();
+          co_return;
+        }
+      }
+    }
+  }(scope, std::move(awaitables));
 }
 
 } // namespace detail
@@ -241,9 +316,8 @@ auto collectAllRange(InputRange awaitables)
 
   const CancellationSource cancelSource;
   CancellationCallback cancelCallback(
-      co_await co_current_cancellation_token, [&]() noexcept {
-        cancelSource.requestCancellation();
-      });
+      co_await co_current_cancellation_token,
+      [&]() noexcept { cancelSource.requestCancellation(); });
   const CancellationToken cancelToken = cancelSource.getToken();
 
   std::vector<detail::collect_all_try_range_component_t<
@@ -295,11 +369,13 @@ auto collectAllRange(InputRange awaitables)
   // context.
   const auto context = RequestContext::saveContext();
 
+  auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
   // Launch the tasks and wait for them all to finish.
   {
     detail::Barrier barrier{tasks.size() + 1};
     for (auto&& task : tasks) {
-      task.start(&barrier);
+      task.start(&barrier, asyncFrame);
       RequestContext::setContext(context);
     }
     co_await detail::UnsafeResumeInlineSemiAwaitable{barrier.arriveAndWait()};
@@ -313,7 +389,7 @@ auto collectAllRange(InputRange awaitables)
 
     // Cancellation was requested of the parent Task before any of the
     // child tasks failed.
-    co_yield co_error(OperationCancelled{});
+    co_yield co_cancelled;
   }
 
   std::vector<detail::collect_all_range_component_t<
@@ -338,9 +414,8 @@ auto collectAllRange(InputRange awaitables) -> folly::coro::Task<void> {
 
   CancellationSource cancelSource;
   CancellationCallback cancelCallback(
-      co_await co_current_cancellation_token, [&]() noexcept {
-        cancelSource.requestCancellation();
-      });
+      co_await co_current_cancellation_token,
+      [&]() noexcept { cancelSource.requestCancellation(); });
   const CancellationToken cancelToken = cancelSource.getToken();
 
   exception_wrapper firstException;
@@ -382,11 +457,13 @@ auto collectAllRange(InputRange awaitables) -> folly::coro::Task<void> {
   // context.
   const auto context = RequestContext::saveContext();
 
+  auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
   // Launch the tasks and wait for them all to finish.
   {
     detail::Barrier barrier{tasks.size() + 1};
     for (auto&& task : tasks) {
-      task.start(&barrier);
+      task.start(&barrier, asyncFrame);
       RequestContext::setContext(context);
     }
     co_await detail::UnsafeResumeInlineSemiAwaitable{barrier.arriveAndWait()};
@@ -430,8 +507,12 @@ auto collectAllTryRange(InputRange awaitables)
             executor.get_alias(),
             co_withCancellation(cancelToken, std::move(semiAwaitable))));
       }
+// This causes "Instruction does not dominate all uses!" internal compiler
+// error on Windows with Clang.
+#if !(defined(_WIN32) && defined(__clang__))
     } catch (const std::exception& ex) {
       result.emplaceException(std::current_exception(), ex);
+#endif
     } catch (...) {
       result.emplaceException(std::current_exception());
     }
@@ -462,11 +543,13 @@ auto collectAllTryRange(InputRange awaitables)
   // context.
   const auto context = RequestContext::saveContext();
 
+  auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
   // Launch the tasks and wait for them all to finish.
   {
     detail::Barrier barrier{tasks.size() + 1};
     for (auto&& task : tasks) {
-      task.start(&barrier);
+      task.start(&barrier, asyncFrame);
       RequestContext::setContext(context);
     }
     co_await detail::UnsafeResumeInlineSemiAwaitable{barrier.arriveAndWait()};
@@ -488,15 +571,14 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
   const folly::Executor::KeepAlive<> executor = co_await co_current_executor;
   const folly::CancellationSource cancelSource;
   folly::CancellationCallback cancelCallback(
-      co_await folly::coro::co_current_cancellation_token, [&]() noexcept {
-        cancelSource.requestCancellation();
-      });
+      co_await folly::coro::co_current_cancellation_token,
+      [&]() noexcept { cancelSource.requestCancellation(); });
   const folly::CancellationToken cancelToken = cancelSource.getToken();
 
   exception_wrapper firstException;
   std::atomic<bool> anyFailures = false;
 
-  const auto trySetFirstException = [&](exception_wrapper && e) noexcept {
+  const auto trySetFirstException = [&](exception_wrapper&& e) noexcept {
     anyFailures.store(true, std::memory_order_relaxed);
     if (!cancelSource.requestCancellation()) {
       // This is first entity to request cancellation.
@@ -504,10 +586,8 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
     }
   };
 
-  using std::begin;
-  using std::end;
-  auto iter = begin(awaitables);
-  const auto iterEnd = end(awaitables);
+  auto iter = access::begin(awaitables);
+  const auto iterEnd = access::end(awaitables);
 
   using iterator_t = decltype(iter);
   using awaitable_t = typename std::iterator_traits<iterator_t>::value_type;
@@ -564,6 +644,8 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
   // context.
   const auto context = RequestContext::saveContext();
 
+  auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
   try {
     auto lock = co_await mutex.co_scoped_lock();
 
@@ -578,7 +660,7 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       workerTasks.push_back(makeWorker());
       barrier.add(1);
-      workerTasks.back().start(&barrier);
+      workerTasks.back().start(&barrier, asyncFrame);
 
       RequestContext::setContext(context);
 
@@ -604,7 +686,7 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
       co_yield co_error(std::move(firstException));
     }
 
-    co_yield co_error(OperationCancelled{});
+    co_yield co_cancelled;
   }
 }
 
@@ -623,15 +705,14 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
   const folly::CancellationSource cancelSource;
   folly::CancellationCallback cancelCallback(
-      co_await folly::coro::co_current_cancellation_token, [&]() noexcept {
-        cancelSource.requestCancellation();
-      });
+      co_await folly::coro::co_current_cancellation_token,
+      [&]() noexcept { cancelSource.requestCancellation(); });
   const folly::CancellationToken cancelToken = cancelSource.getToken();
 
   exception_wrapper firstException;
   std::atomic<bool> anyFailures = false;
 
-  auto trySetFirstException = [&](exception_wrapper && e) noexcept {
+  auto trySetFirstException = [&](exception_wrapper&& e) noexcept {
     anyFailures.store(true, std::memory_order_relaxed);
     if (!cancelSource.requestCancellation()) {
       // This is first entity to request cancellation.
@@ -639,10 +720,8 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
     }
   };
 
-  using std::begin;
-  using std::end;
-  auto iter = begin(awaitables);
-  const auto iterEnd = end(awaitables);
+  auto iter = access::begin(awaitables);
+  const auto iterEnd = access::end(awaitables);
 
   using iterator_t = decltype(iter);
   using awaitable_t = typename std::iterator_traits<iterator_t>::value_type;
@@ -720,6 +799,8 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
   // context.
   const auto context = RequestContext::saveContext();
 
+  auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
   try {
     auto lock = co_await mutex.co_scoped_lock();
 
@@ -734,7 +815,7 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       workerTasks.push_back(makeWorker());
       barrier.add(1);
-      workerTasks.back().start(&barrier);
+      workerTasks.back().start(&barrier, asyncFrame);
 
       RequestContext::setContext(context);
 
@@ -763,7 +844,7 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
     // Otherwise, cancellation was requested before any of the child tasks
     // failed so complete with the OperationCancelled error.
-    co_yield co_error(OperationCancelled{});
+    co_yield co_cancelled;
   }
 
   std::vector<detail::collect_all_range_component_t<
@@ -796,10 +877,8 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
   const Executor::KeepAlive<> executor = co_await co_current_executor;
   const CancellationToken& cancelToken = co_await co_current_cancellation_token;
 
-  using std::begin;
-  using std::end;
-  auto iter = begin(awaitables);
-  const auto iterEnd = end(awaitables);
+  auto iter = access::begin(awaitables);
+  const auto iterEnd = access::end(awaitables);
 
   using iterator_t = decltype(iter);
   using awaitable_t = typename std::iterator_traits<iterator_t>::value_type;
@@ -873,6 +952,8 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
   // context.
   const auto context = RequestContext::saveContext();
 
+  auto& asyncFrame = co_await detail::co_current_async_stack_frame;
+
   try {
     auto lock = co_await mutex.co_scoped_lock();
     while (!iterationException && iter != iterEnd &&
@@ -886,7 +967,7 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       workerTasks.push_back(makeWorker());
       barrier.add(1);
-      workerTasks.back().start(&barrier);
+      workerTasks.back().start(&barrier, asyncFrame);
 
       RequestContext::setContext(context);
 
@@ -914,5 +995,27 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
   co_return results;
 }
 
+template <typename InputRange>
+auto makeUnorderedAsyncGeneratorFromAwaitableRange(
+    AsyncScope& scope, InputRange awaitables)
+    -> AsyncGenerator<detail::async_generator_from_awaitable_range_item_t<
+        InputRange,
+        false>&&> {
+  return detail::makeUnorderedAsyncGeneratorFromAwaitableRangeImpl(
+      scope, std::move(awaitables), bool_constant<false>{});
+}
+
+template <typename InputRange>
+auto makeUnorderedAsyncGeneratorFromAwaitableTryRange(
+    AsyncScope& scope, InputRange awaitables)
+    -> AsyncGenerator<detail::async_generator_from_awaitable_range_item_t<
+        InputRange,
+        true>&&> {
+  return detail::makeUnorderedAsyncGeneratorFromAwaitableRangeImpl(
+      scope, std::move(awaitables), bool_constant<true>{});
+}
+
 } // namespace coro
 } // namespace folly
+
+#endif // FOLLY_HAS_COROUTINES

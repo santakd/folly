@@ -16,8 +16,6 @@
 
 #include <folly/Portability.h>
 
-#if FOLLY_HAS_COROUTINES
-
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/ManualExecutor.h>
 #include <folly/experimental/coro/Baton.h>
@@ -34,6 +32,13 @@
 #include <numeric>
 #include <string>
 #include <vector>
+
+#if FOLLY_HAS_COROUTINES
+
+folly::coro::Task<void> sleepThatShouldBeCancelled(
+    std::chrono::milliseconds dur) {
+  EXPECT_THROW(co_await folly::coro::sleep(dur), folly::OperationCancelled);
+}
 
 class CollectAllTest : public testing::Test {};
 
@@ -209,10 +214,7 @@ template <
     typename BinaryOp,
     typename InitialValue = typename std::iterator_traits<Iter>::value_type>
 folly::coro::Task<InitialValue> parallelAccumulate(
-    Iter begin,
-    Sentinel end,
-    BinaryOp op,
-    InitialValue initialValue = {}) {
+    Iter begin, Sentinel end, BinaryOp op, InitialValue initialValue = {}) {
   auto distance = std::distance(begin, end);
   if (distance < 512) {
     co_return std::accumulate(
@@ -289,11 +291,11 @@ TEST_F(CollectAllTest, CollectAllCancelsSubtasksWhenParentTaskCancelled) {
         cancelSource.getToken(),
         folly::coro::collectAll(
             [&]() -> folly::coro::Task<int> {
-              co_await folly::coro::sleep(10s);
+              co_await sleepThatShouldBeCancelled(10s);
               co_return 42;
             }(),
             [&]() -> folly::coro::Task<float> {
-              co_await folly::coro::sleep(5s);
+              co_await sleepThatShouldBeCancelled(5s);
               co_return 3.14f;
             }(),
             [&]() -> folly::coro::Task<void> {
@@ -317,9 +319,7 @@ class TestRequestData : public folly::RequestData {
  public:
   explicit TestRequestData() noexcept {}
 
-  bool hasCallback() override {
-    return false;
-  }
+  bool hasCallback() override { return false; }
 };
 
 } // namespace
@@ -509,11 +509,11 @@ TEST_F(CollectAllTryTest, CollectAllCancelsSubtasksWhenParentTaskCancelled) {
         cancelSource.getToken(),
         folly::coro::collectAllTry(
             [&]() -> folly::coro::Task<int> {
-              co_await folly::coro::sleep(10s);
+              co_await sleepThatShouldBeCancelled(10s);
               co_return 42;
             }(),
             [&]() -> folly::coro::Task<float> {
-              co_await folly::coro::sleep(5s);
+              co_await sleepThatShouldBeCancelled(5s);
               co_return 3.14f;
             }(),
             [&]() -> folly::coro::Task<void> {
@@ -665,17 +665,16 @@ TEST_F(CollectAllRangeTest, SubtasksCancelledWhenASubtaskFails) {
 
   folly::coro::blockingWait([]() -> folly::coro::Task<void> {
     bool consumedAllTasks = false;
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
       for (int i = 0; i < 10; ++i) {
         co_yield folly::coro::sleep(10s);
       }
 
-      co_yield[]()->folly::coro::Task<void> {
+      co_yield []() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         throw ErrorA{};
-      }
-      ();
+      }();
 
       for (int i = 0; i < 10; ++i) {
         co_yield folly::coro::sleep(10s);
@@ -705,16 +704,14 @@ TEST_F(CollectAllRangeTest, FailsWithErrorOfFirstTaskToFailWhenMultipleErrors) {
       co_await folly::coro::collectAllRange(
           []() -> folly::coro::Generator<folly::coro::Task<void>&&> {
             co_yield folly::coro::sleep(1s);
-            co_yield[]()->folly::coro::Task<> {
+            co_yield []() -> folly::coro::Task<> {
               co_await folly::coro::sleep(1s);
               throw ErrorA{};
-            }
-            ();
-            co_yield[]()->folly::coro::Task<> {
+            }();
+            co_yield []() -> folly::coro::Task<> {
               co_await folly::coro::co_reschedule_on_current_executor;
               throw ErrorB{};
-            }
-            ();
+            }();
             co_yield folly::coro::sleep(2s);
           }());
       CHECK(false);
@@ -730,13 +727,13 @@ TEST_F(CollectAllRangeTest, SubtasksCancelledWhenParentTaskCancelled) {
     folly::CancellationSource cancelSource;
 
     bool consumedAllTasks = false;
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
       for (int i = 0; i < 10; ++i) {
         co_yield folly::coro::sleep(10s);
       }
 
-      co_yield[&]()->folly::coro::Task<void> {
+      co_yield [&]() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
@@ -745,8 +742,7 @@ TEST_F(CollectAllRangeTest, SubtasksCancelledWhenParentTaskCancelled) {
 
         auto token = co_await folly::coro::co_current_cancellation_token;
         CHECK(token.isCancellationRequested());
-      }
-      ();
+      }();
 
       consumedAllTasks = true;
     };
@@ -810,8 +806,8 @@ TEST_F(CollectAllRangeTest, VectorOfTaskWithExecutorUsage) {
     std::vector<folly::coro::TaskWithExecutor<int>> tasks;
     for (int i = 0; i < 4; ++i) {
       tasks.push_back(
-          [](int i) -> folly::coro::Task<int> { co_return i + 1; }(i)
-                           .scheduleOn(&threadPool));
+          [](int idx) -> folly::coro::Task<int> { co_return idx + 1; }(i)
+                             .scheduleOn(&threadPool));
     }
 
     auto results = co_await folly::coro::collectAllRange(std::move(tasks));
@@ -820,6 +816,113 @@ TEST_F(CollectAllRangeTest, VectorOfTaskWithExecutorUsage) {
     CHECK(results[1] == 2);
     CHECK(results[2] == 3);
     CHECK(results[3] == 4);
+  }());
+}
+
+TEST_F(CollectAllRangeTest, GeneatorFromRange) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> {
+      co_await folly::coro::sleep(std::chrono::milliseconds(100 * i));
+      co_return i;
+    };
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      for (int i = 5; i > 0; --i) {
+        co_yield makeTask(i);
+      }
+    };
+
+    auto results = folly::coro::makeUnorderedAsyncGeneratorFromAwaitableRange(
+        scope, generateTasks());
+    // co_await doesn't work inside EXPECT_EQ
+    EXPECT_TRUE(*(co_await results.next()) == 1);
+    EXPECT_TRUE(*(co_await results.next()) == 2);
+    EXPECT_TRUE(*(co_await results.next()) == 3);
+    EXPECT_TRUE(*(co_await results.next()) == 4);
+    EXPECT_TRUE(*(co_await results.next()) == 5);
+    EXPECT_FALSE(co_await results.next());
+    co_await scope.joinAsync();
+  }());
+}
+
+TEST_F(CollectAllRangeTest, GeneatorFromRangePartialConsume) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> { co_return i; };
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      for (int i = 5; i > 0; --i) {
+        co_yield makeTask(i);
+      }
+    };
+
+    auto results = folly::coro::makeUnorderedAsyncGeneratorFromAwaitableRange(
+        scope, generateTasks());
+    for (int i = 0; i < 3; ++i) {
+      co_await results.next();
+    }
+    co_await scope.joinAsync();
+  }());
+}
+
+TEST_F(CollectAllRangeTest, GeneatorFromRangeFailed) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> {
+      co_await folly::coro::sleep(std::chrono::milliseconds(100 * i));
+      co_return i;
+    };
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      co_yield []() -> folly::coro::Task<int> {
+        co_await folly::coro::sleep(std::chrono::milliseconds(350));
+        co_yield folly::coro::co_error(std::runtime_error("foo"));
+      }();
+      for (int i = 5; i > 0; --i) {
+        co_yield makeTask(i);
+      }
+    };
+
+    auto results = folly::coro::makeUnorderedAsyncGeneratorFromAwaitableRange(
+        scope, generateTasks());
+    // co_await doesn't work inside EXPECT_EQ
+    EXPECT_TRUE(*(co_await results.next()) == 1);
+    EXPECT_TRUE(*(co_await results.next()) == 2);
+    EXPECT_TRUE(*(co_await results.next()) == 3);
+    EXPECT_TRUE((co_await co_awaitTry(results.next()))
+                    .hasException<std::runtime_error>());
+    co_await scope.joinAsync();
+  }());
+}
+
+TEST_F(CollectAllRangeTest, GeneatorFromRangeCancelled) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> {
+      co_await folly::coro::sleep(std::chrono::milliseconds(1000 * i));
+      co_return i;
+    };
+    folly::CancellationSource cancelSource;
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      for (int i = 0; i < 10; ++i) {
+        co_yield makeTask(i);
+        if (i == 4) {
+          cancelSource.requestCancellation();
+        }
+      }
+    };
+    auto start = std::chrono::steady_clock::now();
+    auto results = folly::coro::makeUnorderedAsyncGeneratorFromAwaitableRange(
+        scope, generateTasks());
+    auto result = co_await folly::coro::co_withCancellation(
+        cancelSource.getToken(), co_awaitTry(results.next()));
+    auto end = std::chrono::steady_clock::now();
+
+    EXPECT_LT(end - start, std::chrono::milliseconds(1000));
+    EXPECT_TRUE(result.hasException<folly::OperationCancelled>());
+    co_await scope.joinAsync();
   }());
 }
 
@@ -889,8 +992,8 @@ TEST_F(CollectAllTryRangeTest, RangeOfValueSomeFailing) {
 
 TEST_F(CollectAllTryRangeTest, NotCancelledWhenSubtaskFails) {
   folly::coro::blockingWait([]() -> folly::coro::Task<void> {
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
       auto makeValidationTask = []() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
@@ -902,11 +1005,10 @@ TEST_F(CollectAllTryRangeTest, NotCancelledWhenSubtaskFails) {
       co_yield makeValidationTask();
       co_yield makeValidationTask();
 
-      co_yield[]()->folly::coro::Task<void> {
+      co_yield []() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         throw ErrorA{};
-      }
-      ();
+      }();
 
       co_yield makeValidationTask();
       co_yield makeValidationTask();
@@ -929,13 +1031,13 @@ TEST_F(CollectAllTryRangeTest, SubtasksCancelledWhenParentTaskCancelled) {
     folly::CancellationSource cancelSource;
 
     bool consumedAllTasks = false;
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
       for (int i = 0; i < 10; ++i) {
-        co_yield folly::coro::sleep(10s);
+        co_yield sleepThatShouldBeCancelled(10s);
       }
 
-      co_yield[&]()->folly::coro::Task<void> {
+      co_yield [&]() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
@@ -944,8 +1046,7 @@ TEST_F(CollectAllTryRangeTest, SubtasksCancelledWhenParentTaskCancelled) {
 
         auto token = co_await folly::coro::co_current_cancellation_token;
         CHECK(token.isCancellationRequested());
-      }
-      ();
+      }();
 
       consumedAllTasks = true;
     };
@@ -1006,6 +1107,96 @@ TEST_F(CollectAllTryRangeTest, KeepsRequestContextOfChildTasksIndependent) {
   }());
 }
 
+TEST_F(CollectAllTryRangeTest, GeneatorFromRange) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> {
+      co_await folly::coro::sleep(std::chrono::milliseconds(100 * i));
+      co_return i;
+    };
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      for (int i = 5; i > 0; --i) {
+        co_yield makeTask(i);
+      }
+    };
+
+    auto results =
+        folly::coro::makeUnorderedAsyncGeneratorFromAwaitableTryRange(
+            scope, generateTasks());
+    // co_await doesn't work inside EXPECT_EQ
+    EXPECT_TRUE(**(co_await results.next()) == 1);
+    EXPECT_TRUE(**(co_await results.next()) == 2);
+    EXPECT_TRUE(**(co_await results.next()) == 3);
+    EXPECT_TRUE(**(co_await results.next()) == 4);
+    EXPECT_TRUE(**(co_await results.next()) == 5);
+    co_await scope.joinAsync();
+  }());
+}
+
+TEST_F(CollectAllTryRangeTest, GeneatorFromRangeFailed) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> {
+      co_await folly::coro::sleep(std::chrono::milliseconds(200 * i));
+      co_return i;
+    };
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      co_yield []() -> folly::coro::Task<int> {
+        co_await folly::coro::sleep(std::chrono::milliseconds(700));
+        co_yield folly::coro::co_error(std::runtime_error("foo"));
+      }();
+      for (int i = 5; i > 0; --i) {
+        co_yield makeTask(i);
+      }
+    };
+
+    auto results =
+        folly::coro::makeUnorderedAsyncGeneratorFromAwaitableTryRange(
+            scope, generateTasks());
+    // co_await doesn't work inside EXPECT_EQ
+    EXPECT_TRUE(**(co_await results.next()) == 1);
+    EXPECT_TRUE(**(co_await results.next()) == 2);
+    EXPECT_TRUE(**(co_await results.next()) == 3);
+    EXPECT_TRUE((co_await results.next())->hasException<std::runtime_error>());
+    EXPECT_TRUE(**(co_await results.next()) == 4);
+    EXPECT_TRUE(**(co_await results.next()) == 5);
+    co_await scope.joinAsync();
+  }());
+}
+
+TEST_F(CollectAllTryRangeTest, GeneatorFromRangeCancelled) {
+  folly::coro::blockingWait([]() -> folly::coro::Task<void> {
+    folly::coro::AsyncScope scope;
+    auto makeTask = [](int i) -> folly::coro::Task<int> {
+      co_await folly::coro::sleep(std::chrono::milliseconds(1000 * i));
+      co_return i;
+    };
+    folly::CancellationSource cancelSource;
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
+      for (int i = 1; i < 10; ++i) {
+        co_yield makeTask(i);
+        if (i == 4) {
+          cancelSource.requestCancellation();
+        }
+      }
+    };
+    auto start = std::chrono::steady_clock::now();
+    auto results =
+        folly::coro::makeUnorderedAsyncGeneratorFromAwaitableTryRange(
+            scope, generateTasks());
+    auto result = co_await folly::coro::co_withCancellation(
+        cancelSource.getToken(), results.next());
+    auto end = std::chrono::steady_clock::now();
+
+    EXPECT_LT(end - start, std::chrono::milliseconds(1000));
+    EXPECT_TRUE(result->hasException<folly::OperationCancelled>());
+    co_await scope.joinAsync();
+  }());
+}
+
 class CollectAllWindowedTest : public testing::Test {};
 
 TEST_F(CollectAllWindowedTest, ConcurrentTasks) {
@@ -1017,11 +1208,10 @@ TEST_F(CollectAllWindowedTest, ConcurrentTasks) {
   auto results = blockingWait(collectAllWindowed(
       [&]() -> Generator<Task<std::string>&&> {
         for (int i = 0; i < 10'000; ++i) {
-          co_yield[](int i)->Task<std::string> {
+          co_yield [](int idx) -> Task<std::string> {
             co_await folly::coro::co_reschedule_on_current_executor;
-            co_return folly::to<std::string>(i);
-          }
-          (i);
+            co_return folly::to<std::string>(idx);
+          }(i);
         }
       }(),
       10));
@@ -1054,8 +1244,8 @@ TEST_F(CollectAllWindowedTest, WithGeneratorOfTaskOfValue) {
     co_return index;
   };
 
-  auto makeTaskGenerator = [&]()
-      -> folly::coro::Generator<folly::coro::Task<int>&&> {
+  auto makeTaskGenerator =
+      [&]() -> folly::coro::Generator<folly::coro::Task<int>&&> {
     for (int i = 0; i < 100; ++i) {
       co_yield makeTask(i);
     }
@@ -1088,8 +1278,8 @@ TEST_F(CollectAllWindowedTest, WithGeneratorOfTaskOfVoid) {
     ++completedCount;
   };
 
-  auto makeTaskGenerator = [&]()
-      -> folly::coro::Generator<folly::coro::Task<void>&&> {
+  auto makeTaskGenerator =
+      [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
     for (int i = 0; i < 100; ++i) {
       co_yield makeTask();
     }
@@ -1155,24 +1345,23 @@ TEST_F(CollectAllWindowedTest, MultipleFailuresPropagatesFirstError) {
         folly::coro::blockingWait(folly::coro::collectAllWindowed(
             []() -> folly::coro::Generator<folly::coro::Task<int>&&> {
               for (int i = 0; i < 10; ++i) {
-                co_yield[](int i)->folly::coro::Task<int> {
+                co_yield [](int idx) -> folly::coro::Task<int> {
                   using namespace std::literals::chrono_literals;
-                  if (i == 3) {
+                  if (idx == 3) {
                     co_await folly::coro::co_reschedule_on_current_executor;
                     co_await folly::coro::co_reschedule_on_current_executor;
                     throw ErrorA{};
-                  } else if (i == 7) {
+                  } else if (idx == 7) {
                     co_await folly::coro::co_reschedule_on_current_executor;
                     throw ErrorB{};
                   }
-                  co_return i;
-                }
-                (i);
+                  co_return idx;
+                }(i);
               }
             }(),
             5));
     CHECK(false); // Should have thrown.
-  } catch (ErrorB) {
+  } catch (const ErrorB&) {
     // Expected.
   }
 }
@@ -1182,13 +1371,12 @@ TEST_F(CollectAllWindowedTest, SubtasksCancelledWhenASubtaskFails) {
 
   folly::coro::blockingWait([]() -> folly::coro::Task<void> {
     bool consumedAllTasks = false;
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
-      co_yield[]()->folly::coro::Task<void> {
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
+      co_yield []() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         throw ErrorA{};
-      }
-      ();
+      }();
 
       for (int i = 0; i < 10; ++i) {
         co_yield folly::coro::sleep(10s);
@@ -1217,12 +1405,12 @@ TEST_F(CollectAllWindowedTest, SubtasksCancelledWhenParentTaskCancelled) {
     folly::CancellationSource cancelSource;
 
     bool consumedAllTasks = false;
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
-      co_yield folly::coro::sleep(10s);
-      co_yield folly::coro::sleep(10s);
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
+      co_yield sleepThatShouldBeCancelled(10s);
+      co_yield sleepThatShouldBeCancelled(10s);
 
-      co_yield[&]()->folly::coro::Task<void> {
+      co_yield [&]() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
@@ -1231,11 +1419,10 @@ TEST_F(CollectAllWindowedTest, SubtasksCancelledWhenParentTaskCancelled) {
 
         auto token = co_await folly::coro::co_current_cancellation_token;
         CHECK(token.isCancellationRequested());
-      }
-      ();
+      }();
 
-      co_yield folly::coro::sleep(10s);
-      co_yield folly::coro::sleep(10s);
+      co_yield sleepThatShouldBeCancelled(10s);
+      co_yield sleepThatShouldBeCancelled(10s);
 
       consumedAllTasks = true;
     };
@@ -1300,8 +1487,8 @@ TEST_F(CollectAllWindowedTest, VectorOfTaskWithExecutorUsage) {
     std::vector<folly::coro::TaskWithExecutor<int>> tasks;
     for (int i = 0; i < 4; ++i) {
       tasks.push_back(
-          [](int i) -> folly::coro::Task<int> { co_return i + 1; }(i)
-                           .scheduleOn(&threadPool));
+          [](int idx) -> folly::coro::Task<int> { co_return idx + 1; }(i)
+                             .scheduleOn(&threadPool));
     }
 
     auto results =
@@ -1320,19 +1507,18 @@ TEST_F(CollectAllTryWindowedTest, PartialFailure) {
   auto results = folly::coro::blockingWait(folly::coro::collectAllTryWindowed(
       []() -> folly::coro::Generator<folly::coro::Task<int>&&> {
         for (int i = 0; i < 10; ++i) {
-          co_yield[](int i)->folly::coro::Task<int> {
+          co_yield [](int idx) -> folly::coro::Task<int> {
             using namespace std::literals::chrono_literals;
-            if (i == 3) {
+            if (idx == 3) {
               co_await folly::coro::co_reschedule_on_current_executor;
               co_await folly::coro::co_reschedule_on_current_executor;
               throw ErrorA{};
-            } else if (i == 7) {
+            } else if (idx == 7) {
               co_await folly::coro::co_reschedule_on_current_executor;
               throw ErrorB{};
             }
-            co_return i;
-          }
-          (i);
+            co_return idx;
+          }(i);
         }
       }(),
       5));
@@ -1364,8 +1550,8 @@ TEST_F(CollectAllTryWindowedTest, GeneratorFailure) {
     --active;
   };
 
-  auto generateTasks = [&]()
-      -> folly::coro::Generator<folly::coro::Task<void>&&> {
+  auto generateTasks =
+      [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
     for (int i = 0; i < 10; ++i) {
       co_yield makeTask(i);
     }
@@ -1376,7 +1562,7 @@ TEST_F(CollectAllTryWindowedTest, GeneratorFailure) {
     [[maybe_unused]] auto results = folly::coro::blockingWait(
         folly::coro::collectAllTryWindowed(generateTasks(), 5));
     CHECK(false);
-  } catch (ErrorA) {
+  } catch (const ErrorA&) {
   }
 
   // Even if the generator throws an exception we should still have launched
@@ -1387,13 +1573,12 @@ TEST_F(CollectAllTryWindowedTest, GeneratorFailure) {
 
 TEST_F(CollectAllTryWindowedTest, NotCancelledWhenSubtaskFails) {
   folly::coro::blockingWait([]() -> folly::coro::Task<void> {
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
-      co_yield[]()->folly::coro::Task<void> {
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
+      co_yield []() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         throw ErrorA{};
-      }
-      ();
+      }();
 
       auto makeValidationTask = []() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
@@ -1423,12 +1608,12 @@ TEST_F(CollectAllTryWindowedTest, SubtasksCancelledWhenParentTaskCancelled) {
     folly::CancellationSource cancelSource;
 
     bool consumedAllTasks = false;
-    auto generateTasks = [&]()
-        -> folly::coro::Generator<folly::coro::Task<void>&&> {
-      co_yield folly::coro::sleep(10s);
-      co_yield folly::coro::sleep(10s);
+    auto generateTasks =
+        [&]() -> folly::coro::Generator<folly::coro::Task<void>&&> {
+      co_yield sleepThatShouldBeCancelled(10s);
+      co_yield sleepThatShouldBeCancelled(10s);
 
-      co_yield[&]()->folly::coro::Task<void> {
+      co_yield [&]() -> folly::coro::Task<void> {
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
         co_await folly::coro::co_reschedule_on_current_executor;
@@ -1437,11 +1622,10 @@ TEST_F(CollectAllTryWindowedTest, SubtasksCancelledWhenParentTaskCancelled) {
 
         auto token = co_await folly::coro::co_current_cancellation_token;
         CHECK(token.isCancellationRequested());
-      }
-      ();
+      }();
 
-      co_yield folly::coro::sleep(10s);
-      co_yield folly::coro::sleep(10s);
+      co_yield sleepThatShouldBeCancelled(10s);
+      co_yield sleepThatShouldBeCancelled(10s);
 
       consumedAllTasks = true;
     };

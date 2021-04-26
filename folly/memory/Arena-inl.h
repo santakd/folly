@@ -20,6 +20,8 @@
 
 // Implementation of Arena.h functions
 
+#include <folly/lang/SafeAssert.h>
+
 namespace folly {
 
 template <class Alloc>
@@ -32,7 +34,7 @@ void* Arena<Alloc>::allocateSlow(size_t size) {
   }
   if (sizeLimit_ != kNoSizeLimit &&
       allocSize > sizeLimit_ - totalAllocatedSize_) {
-    throw_exception(std::bad_alloc());
+    throw_exception<std::bad_alloc>();
   }
 
   if (size > minBlockSize()) {
@@ -42,7 +44,7 @@ void* Arena<Alloc>::allocateSlow(size_t size) {
     void* mem = AllocTraits::allocate(alloc(), allocSize);
     auto blk = new (mem) LargeBlock(allocSize);
     start = blk->start();
-    largeBlocks_.push_front(*blk);
+    largeBlocks_.push_back(*blk);
   } else {
     // Allocate a normal sized block and carve out size bytes from it
     // Will allocate more than size bytes if convenient
@@ -52,7 +54,8 @@ void* Arena<Alloc>::allocateSlow(size_t size) {
     void* mem = AllocTraits::allocate(alloc(), allocSize);
     auto blk = new (mem) Block();
     start = blk->start();
-    blocks_.push_front(*blk);
+    blocks_.push_back(*blk);
+    currentBlock_ = blocks_.last();
     ptr_ = start + size;
     end_ = start + allocSize - sizeof(Block);
     assert(ptr_ <= end_);
@@ -74,19 +77,7 @@ void Arena<Alloc>::merge(Arena<Alloc>&& other) {
   other.ptr_ = other.end_ = nullptr;
   totalAllocatedSize_ += other.totalAllocatedSize_;
   other.totalAllocatedSize_ = 0;
+  bytesUsed_ += other.bytesUsed_;
+  other.bytesUsed_ = 0;
 }
-
-template <class Alloc>
-Arena<Alloc>::~Arena() {
-  blocks_.clear_and_dispose([this](Block* b) {
-    b->~Block();
-    AllocTraits::deallocate(alloc(), b, blockGoodAllocSize());
-  });
-  largeBlocks_.clear_and_dispose([this](LargeBlock* b) {
-    auto size = b->allocSize;
-    b->~LargeBlock();
-    AllocTraits::deallocate(alloc(), b, size);
-  });
-}
-
 } // namespace folly

@@ -16,12 +16,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+
 #include <folly/CancellationToken.h>
 #include <folly/fibers/ExecutorBasedLoopController.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/io/async/VirtualEventBase.h>
-#include <atomic>
-#include <memory>
 
 namespace folly {
 namespace fibers {
@@ -37,17 +38,13 @@ class EventBaseLoopController : public ExecutorBasedLoopController {
   void attachEventBase(EventBase& eventBase);
   void attachEventBase(VirtualEventBase& eventBase);
 
-  VirtualEventBase* getEventBase() {
-    return eventBase_;
-  }
+  VirtualEventBase* getEventBase() { return eventBase_; }
 
   void setLoopRunner(InlineFunctionRunner* loopRunner) {
     loopRunner_ = loopRunner;
   }
 
-  folly::Executor* executor() const override {
-    return eventBase_;
-  }
+  folly::Executor* executor() const override { return eventBase_; }
 
  private:
   class ControllerCallback : public folly::EventBase::LoopCallback {
@@ -55,9 +52,7 @@ class EventBaseLoopController : public ExecutorBasedLoopController {
     explicit ControllerCallback(EventBaseLoopController& controller)
         : controller_(controller) {}
 
-    void runLoopCallback() noexcept override {
-      controller_.runLoop();
-    }
+    void runLoopCallback() noexcept override { controller_.runLoop(); }
 
    private:
     EventBaseLoopController& controller_;

@@ -14,17 +14,17 @@
  * limitations under the License.
  */
 
-#include <folly/container/Array.h>
-#include <folly/io/async/test/RequestContextHelper.h>
-#include <folly/portability/GFlags.h>
-#include <folly/synchronization/test/Barrier.h>
-
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <thread>
 #include <vector>
+
+#include <folly/container/Array.h>
+#include <folly/io/async/test/RequestContextHelper.h>
+#include <folly/portability/GFlags.h>
+#include <folly/synchronization/test/Barrier.h>
 
 DEFINE_int32(reps, 10, "number of reps");
 DEFINE_int32(ops, 1000000, "number of operations per rep");
@@ -206,10 +206,7 @@ uint64_t bench_RequestContextScopeGuard(int nthr, uint64_t ops, bool nonempty) {
 }
 
 uint64_t bench_ShallowCopyRequestContextScopeGuard(
-    int nthr,
-    uint64_t ops,
-    int keep,
-    bool replace) {
+    int nthr, uint64_t ops, int keep, bool replace) {
   auto fn = [&](int tid) {
     RequestContextScopeGuard g1;
     auto ctx = RequestContext::get();
@@ -300,8 +297,8 @@ onSet                                12 ns     12 ns      0 ns     12 ns
 onUnset                              12 ns     12 ns      0 ns     12 ns
 setContext                           46 ns     44 ns      1 ns     42 ns
 RequestContextScopeGuard            113 ns    103 ns      3 ns    101 ns
-ShallowCopyRequestC...-replace      230 ns    221 ns      4 ns    217 ns
-ShallowCopyReq...-keep&replace      904 ns    893 ns      5 ns    886 ns
+ShallowCopyRequestC...-replace      213 ns    201 ns      5 ns    196 ns
+ShallowCopyReq...-keep&replace      883 ns    835 ns     20 ns    814 ns
 ============================== 10 threads ==============================
 hasContextData                        1 ns      1 ns      0 ns      1 ns
 getContextData                        2 ns      1 ns      0 ns      1 ns
@@ -309,7 +306,7 @@ onSet                                 2 ns      2 ns      0 ns      1 ns
 onUnset                               2 ns      2 ns      0 ns      1 ns
 setContext                           11 ns      7 ns      2 ns      5 ns
 RequestContextScopeGuard             22 ns     15 ns      5 ns     11 ns
-ShallowCopyRequestC...-replace       51 ns     32 ns     11 ns     24 ns
-ShallowCopyReq...-keep&replace      102 ns     98 ns      2 ns     96 ns
+ShallowCopyRequestC...-replace       48 ns     30 ns     11 ns     21 ns
+ShallowCopyReq...-keep&replace       98 ns     93 ns      2 ns     91 ns
 ========================================================================
  */

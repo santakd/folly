@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include <glog/logging.h>
+
 #include <folly/Executor.h>
 #include <folly/Function.h>
 #include <folly/Optional.h>
@@ -29,13 +31,11 @@
 #include <folly/Try.h>
 #include <folly/Utility.h>
 #include <folly/futures/detail/Types.h>
+#include <folly/io/async/Request.h>
 #include <folly/lang/Assume.h>
 #include <folly/lang/Exception.h>
 #include <folly/synchronization/AtomicUtil.h>
 #include <folly/synchronization/MicroSpinLock.h>
-#include <glog/logging.h>
-
-#include <folly/io/async/Request.h>
 
 namespace folly {
 namespace futures {
@@ -197,9 +197,7 @@ class InterruptHandlerImpl : public InterruptHandler {
  public:
   explicit InterruptHandlerImpl(F f) : f_(std::move(f)) {}
 
-  void handle(const folly::exception_wrapper& ew) const override {
-    f_(ew);
-  }
+  void handle(const folly::exception_wrapper& ew) const override { f_(ew); }
 
  private:
   F f_;
@@ -259,15 +257,15 @@ class InterruptHandlerImpl : public InterruptHandler {
 ///   |      \           (setCallback())           (setResult())       |
 ///   |       \             \                       /                  |
 ///   |        \              ---> OnlyCallback ---                    |
-///   |        \            or OnlyCallbackAllowInline                 |
-///   |         \                                   \                  |
-///   |     (setProxy())                           (setProxy())        |
-///   |           \                                   \                |
-///   |            \                                    ------> Empty  |
-///   |             \                                 /                |
-///   |              \                             (setCallback())     |
-///   |               \                             /                  |
-///   |                 ---------> Proxy ----------                    |
+///   |         \           or OnlyCallbackAllowInline                 |
+///   |          \                                  \                  |
+///   |      (setProxy())                          (setProxy())        |
+///   |            \                                  \                |
+///   |             \                                   ------> Empty  |
+///   |              \                                /                |
+///   |               \                            (setCallback())     |
+///   |                \                            /                  |
+///   |                  --------> Proxy ----------                    |
 ///   +----------------------------------------------------------------+
 ///
 /// States and the corresponding producer-to-consumer data status & ownership:
@@ -340,8 +338,8 @@ class InterruptHandlerImpl : public InterruptHandler {
 class CoreBase {
  protected:
   using Context = std::shared_ptr<RequestContext>;
-  using Callback = folly::Function<
-      void(CoreBase&, Executor::KeepAlive<>&&, exception_wrapper* ew)>;
+  using Callback = folly::Function<void(
+      CoreBase&, Executor::KeepAlive<>&&, exception_wrapper* ew)>;
 
  public:
   // not copyable
@@ -354,8 +352,8 @@ class CoreBase {
 
   /// May call from any thread
   bool hasCallback() const noexcept {
-    constexpr auto allowed =
-        State::OnlyCallback | State::OnlyCallbackAllowInline | State::Done;
+    constexpr auto allowed = State::OnlyCallback |
+        State::OnlyCallbackAllowInline | State::Done | State::Empty;
     auto const state = state_.load(std::memory_order_acquire);
     return State() != (state & allowed);
   }
@@ -372,16 +370,12 @@ class CoreBase {
   /// True if state is OnlyResult or Done.
   ///
   /// Identical to `this->hasResult()`
-  bool ready() const noexcept {
-    return hasResult();
-  }
+  bool ready() const noexcept { return hasResult(); }
 
   /// Called by a destructing Future (in the consumer thread, by definition).
   /// Calls `delete this` if there are no more references to `this`
   /// (including if `detachPromise()` is called previously or concurrently).
-  void detachFuture() noexcept {
-    detachOne();
-  }
+  void detachFuture() noexcept { detachOne(); }
 
   /// Called by a destructing Promise (in the producer thread, by definition).
   /// Calls `delete this` if there are no more references to `this`
@@ -445,7 +439,7 @@ class CoreBase {
       } else {
         auto oldInterruptHandler = interruptHandler_.exchange(
             new InterruptHandlerImpl<typename std::decay<F>::type>(
-                std::forward<F>(fn)),
+                static_cast<F&&>(fn)),
             std::memory_order_relaxed);
         if (oldInterruptHandler) {
           oldInterruptHandler->release();
@@ -516,21 +510,17 @@ class Core final : private ResultHolder<T>, public CoreBase {
   using Result = Try<T>;
 
   /// State will be Start
-  static Core* make() {
-    return new Core();
-  }
+  static Core* make() { return new Core(); }
 
   /// State will be OnlyResult
   /// Result held will be move-constructed from `t`
-  static Core* make(Try<T>&& t) {
-    return new Core(std::move(t));
-  }
+  static Core* make(Try<T>&& t) { return new Core(std::move(t)); }
 
   /// State will be OnlyResult
   /// Result held will be the `T` constructed from forwarded `args`
   template <typename... Args>
   static Core<T>* make(in_place_t, Args&&... args) {
-    return new Core<T>(in_place, std::forward<Args>(args)...);
+    return new Core<T>(in_place, static_cast<Args&&>(args)...);
   }
 
   /// Call only from consumer thread (since the consumer thread can modify the
@@ -582,7 +572,7 @@ class Core final : private ResultHolder<T>, public CoreBase {
       F&& func,
       std::shared_ptr<folly::RequestContext>&& context,
       futures::detail::InlineContinuation allowInline) {
-    Callback callback = [func = std::forward<F>(func)](
+    Callback callback = [func = static_cast<F&&>(func)](
                             CoreBase& coreBase,
                             Executor::KeepAlive<>&& ka,
                             exception_wrapper* ew) mutable {
@@ -645,7 +635,7 @@ class Core final : private ResultHolder<T>, public CoreBase {
   explicit Core(in_place_t, Args&&... args) noexcept(
       std::is_nothrow_constructible<T, Args&&...>::value)
       : CoreBase(State::OnlyResult, 1) {
-    new (&this->result_) Result(in_place, std::forward<Args>(args)...);
+    new (&this->result_) Result(in_place, static_cast<Args&&>(args)...);
   }
 
   ~Core() override {

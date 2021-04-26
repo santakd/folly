@@ -24,6 +24,7 @@
 #include <folly/Optional.h>
 #include <folly/Range.h>
 #include <folly/Utility.h>
+#include <folly/lang/Exception.h>
 
 namespace folly {
 
@@ -63,9 +64,7 @@ class Executor {
   /// This is up to the implementation to enforce
   virtual void addWithPriority(Func, int8_t priority);
 
-  virtual uint8_t getNumPriorities() const {
-    return 1;
-  }
+  virtual uint8_t getNumPriorities() const { return 1; }
 
   static const int8_t LO_PRI = SCHAR_MIN;
   static const int8_t MID_PRI = 0;
@@ -92,6 +91,11 @@ class Executor {
     KeepAlive() = default;
 
     ~KeepAlive() {
+      static_assert(
+          std::is_standard_layout<KeepAlive>::value, "standard-layout");
+      static_assert(sizeof(KeepAlive) == sizeof(void*), "pointer size");
+      static_assert(alignof(KeepAlive) == alignof(void*), "pointer align");
+
       reset();
     }
 
@@ -156,21 +160,15 @@ class Executor {
       }
     }
 
-    explicit operator bool() const {
-      return storage_;
-    }
+    explicit operator bool() const { return storage_; }
 
     ExecutorT* get() const {
       return reinterpret_cast<ExecutorT*>(storage_ & kExecutorMask);
     }
 
-    ExecutorT& operator*() const {
-      return *get();
-    }
+    ExecutorT& operator*() const { return *get(); }
 
-    ExecutorT* operator->() const {
-      return get();
-    }
+    ExecutorT* operator->() const { return get(); }
 
     KeepAlive copy() const {
       return isKeepAliveDummy(*this) //
@@ -178,9 +176,7 @@ class Executor {
           : getKeepAliveToken(get());
     }
 
-    KeepAlive get_alias() const {
-      return KeepAlive(storage_ | kAliasFlag);
-    }
+    KeepAlive get_alias() const { return KeepAlive(storage_ | kAliasFlag); }
 
     template <class KAF>
     void add(KAF&& f) && {
@@ -234,6 +230,12 @@ class Executor {
     return getKeepAliveToken(&executor);
   }
 
+  template <typename F>
+  FOLLY_ERASE static void invokeCatchingExns(char const* p, F f) noexcept {
+    auto h = [p](auto&... e) noexcept { invokeCatchingExnsLog(p, &e...); };
+    catch_exception([&] { catch_exception<std::exception const&>(f, h); }, h);
+  }
+
  protected:
   /**
    * Returns true if the KeepAlive is constructed from an executor that does
@@ -242,6 +244,13 @@ class Executor {
   template <typename ExecutorT>
   static bool isKeepAliveDummy(const KeepAlive<ExecutorT>& keepAlive) {
     return keepAlive.storage_ & KeepAlive<ExecutorT>::kDummyFlag;
+  }
+
+  static bool keepAliveAcquire(Executor* executor) {
+    return executor->keepAliveAcquire();
+  }
+  static void keepAliveRelease(Executor* executor) {
+    return executor->keepAliveRelease();
   }
 
   // Acquire a keep alive token. Should return false if keep-alive mechanism
@@ -260,6 +269,9 @@ class Executor {
   }
 
  private:
+  static void invokeCatchingExnsLog(
+      char const* prefix, std::exception const* ex = nullptr);
+
   template <typename ExecutorT>
   static KeepAlive<ExecutorT> makeKeepAliveDummy(ExecutorT* executor) {
     static_assert(
@@ -313,13 +325,13 @@ static_assert(
 class ExecutorBlockingGuard {
  public:
   struct PermitTag {};
-  struct ForbidTag {};
+  struct TrackTag {};
 
   ~ExecutorBlockingGuard();
   ExecutorBlockingGuard() = delete;
 
   explicit ExecutorBlockingGuard(PermitTag) noexcept;
-  explicit ExecutorBlockingGuard(ForbidTag, StringPiece name) noexcept;
+  explicit ExecutorBlockingGuard(TrackTag, StringPiece name) noexcept;
 
   ExecutorBlockingGuard(ExecutorBlockingGuard&&) = delete;
   ExecutorBlockingGuard(ExecutorBlockingGuard const&) = delete;

@@ -27,11 +27,12 @@ struct MockAsyncUDPSocket : public AsyncUDPSocket {
   ~MockAsyncUDPSocket() override {}
 
   MOCK_CONST_METHOD0(address, const SocketAddress&());
-  MOCK_METHOD1(bind, void(const SocketAddress&));
+  MOCK_METHOD2(
+      bind,
+      void(const SocketAddress&, AsyncUDPSocket::BindOptions bindOptions));
   MOCK_METHOD2(setFD, void(NetworkSocket, AsyncUDPSocket::FDOwnership));
   MOCK_METHOD2(
-      write,
-      ssize_t(const SocketAddress&, const std::unique_ptr<IOBuf>&));
+      write, ssize_t(const SocketAddress&, const std::unique_ptr<IOBuf>&));
   MOCK_METHOD3(
       writeGSO,
       ssize_t(
@@ -39,8 +40,7 @@ struct MockAsyncUDPSocket : public AsyncUDPSocket {
           const std::unique_ptr<folly::IOBuf>&,
           int));
   MOCK_METHOD3(
-      writev,
-      ssize_t(const SocketAddress&, const struct iovec*, size_t));
+      writev, ssize_t(const SocketAddress&, const struct iovec*, size_t));
   MOCK_METHOD1(resumeRead, void(ReadCallback*));
   MOCK_METHOD0(pauseRead, void());
   MOCK_METHOD0(close, void());

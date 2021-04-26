@@ -17,8 +17,11 @@
 #pragma once
 
 #include <folly/concurrency/UnboundedQueue.h>
+#include <folly/experimental/coro/Coroutine.h>
 #include <folly/experimental/coro/Task.h>
 #include <folly/fibers/Semaphore.h>
+
+#if FOLLY_HAS_COROUTINES
 
 namespace folly {
 namespace coro {
@@ -49,20 +52,16 @@ class UnboundedQueue {
   }
 
   folly::Optional<T> try_dequeue() {
-    return queue_.try_dequeue();
+    return sem_.try_wait() ? queue_.try_dequeue() : folly::none;
   }
 
   bool try_dequeue(T& out) {
-    return queue_.try_dequeue(out);
+    return sem_.try_wait() ? queue_.try_dequeue(out) : false;
   }
 
-  bool empty() {
-    return queue_.empty();
-  }
+  bool empty() { return queue_.empty(); }
 
-  size_t size() {
-    return queue_.size();
-  }
+  size_t size() { return queue_.size(); }
 
  private:
   folly::UnboundedQueue<T, SingleProducer, SingleConsumer, false> queue_;
@@ -71,3 +70,5 @@ class UnboundedQueue {
 
 } // namespace coro
 } // namespace folly
+
+#endif // FOLLY_HAS_COROUTINES

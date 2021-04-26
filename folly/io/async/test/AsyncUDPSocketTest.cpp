@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <folly/io/async/AsyncUDPSocket.h>
+
 #include <thread>
 
 #include <folly/Conv.h>
@@ -23,7 +25,6 @@
 #include <folly/io/IOBuf.h>
 #include <folly/io/async/AsyncTimeout.h>
 #include <folly/io/async/AsyncUDPServerSocket.h>
-#include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
@@ -42,15 +43,22 @@ using OnDataAvailableParams =
 
 class UDPAcceptor : public AsyncUDPServerSocket::Callback {
  public:
-  UDPAcceptor(EventBase* evb, int n, bool changePortForWrites)
-      : evb_(evb), n_(n), changePortForWrites_(changePortForWrites) {}
+  UDPAcceptor(
+      EventBase* evb,
+      int n,
+      bool changePortForWrites,
+      const folly::SocketAddress& serverAddress)
+      : evb_(evb),
+        n_(n),
+        changePortForWrites_(changePortForWrites),
+        serverAddress_(serverAddress) {}
 
   void onListenStarted() noexcept override {}
 
   void onListenStopped() noexcept override {}
 
   void onDataAvailable(
-      std::shared_ptr<folly::AsyncUDPSocket> socket,
+      std::shared_ptr<folly::AsyncUDPSocket> /* socket */,
       const folly::SocketAddress& client,
       std::unique_ptr<folly::IOBuf> data,
       bool truncated,
@@ -63,16 +71,18 @@ class UDPAcceptor : public AsyncUDPServerSocket::Callback {
             << "(trun:" << truncated << ") from " << client.describe() << " - "
             << lastMsg_;
 
-    sendPong(socket);
+    sendPong();
   }
 
-  void sendPong(std::shared_ptr<folly::AsyncUDPSocket> socket) noexcept {
+  void sendPong() noexcept {
     try {
-      auto writeSocket = socket;
+      auto writeSocket = std::make_shared<folly::AsyncUDPSocket>(evb_);
       if (changePortForWrites_) {
-        writeSocket = std::make_shared<folly::AsyncUDPSocket>(evb_);
         writeSocket->setReuseAddr(false);
         writeSocket->bind(folly::SocketAddress("127.0.0.1", 0));
+      } else {
+        writeSocket->setReusePort(true);
+        writeSocket->bind(serverAddress_);
       }
       writeSocket->write(lastClient_, folly::IOBuf::copyBuffer(lastMsg_));
     } catch (const std::exception& ex) {
@@ -86,6 +96,7 @@ class UDPAcceptor : public AsyncUDPServerSocket::Callback {
   // Whether to create a new port per write.
   bool changePortForWrites_{true};
 
+  folly::SocketAddress serverAddress_;
   folly::SocketAddress lastClient_;
   std::string lastMsg_;
 };
@@ -99,6 +110,7 @@ class UDPServer {
     CHECK(evb_->isInEventBaseThread());
 
     socket_ = std::make_unique<AsyncUDPServerSocket>(evb_, 1500);
+    socket_->setReusePort(true);
 
     try {
       socket_->bind(addr_);
@@ -113,7 +125,8 @@ class UDPServer {
     // Add numWorkers thread
     int i = 0;
     for (auto& evb : evbs_) {
-      acceptors_.emplace_back(&evb, i, changePortForWrites_);
+      acceptors_.emplace_back(
+          &evb, i, changePortForWrites_, socket_->address());
 
       std::thread t([&]() { evb.loopForever(); });
 
@@ -127,9 +140,7 @@ class UDPServer {
     socket_->listen();
   }
 
-  folly::SocketAddress address() const {
-    return socket_->address();
-  }
+  folly::SocketAddress address() const { return socket_->address(); }
 
   void shutdown() {
     CHECK(evb_->isInEventBaseThread());
@@ -145,17 +156,11 @@ class UDPServer {
     }
   }
 
-  void pauseAccepting() {
-    socket_->pauseAccepting();
-  }
+  void pauseAccepting() { socket_->pauseAccepting(); }
 
-  void resumeAccepting() {
-    socket_->resumeAccepting();
-  }
+  void resumeAccepting() { socket_->resumeAccepting(); }
 
-  bool isAccepting() {
-    return socket_->isAccepting();
-  }
+  bool isAccepting() { return socket_->isAccepting(); }
 
   // Whether writes from the UDP server should change the port for each message.
   void setChangePortForWrites(bool changePortForWrites) {
@@ -183,8 +188,8 @@ class UDPClient : private AsyncUDPSocket::ReadCallback, private AsyncTimeout {
 
   explicit UDPClient(EventBase* evb) : AsyncTimeout(evb), evb_(evb) {}
 
-  void
-  start(const folly::SocketAddress& server, int n, bool sendClustered = false) {
+  void start(
+      const folly::SocketAddress& server, int n, bool sendClustered = false) {
     CHECK(evb_->isInEventBaseThread());
     server_ = server;
     socket_ = std::make_unique<AsyncUDPSocket>(evb_);
@@ -216,9 +221,11 @@ class UDPClient : private AsyncUDPSocket::ReadCallback, private AsyncTimeout {
 
   void shutdown() {
     CHECK(evb_->isInEventBaseThread());
-    socket_->pauseRead();
-    socket_->close();
-    socket_.reset();
+    if (socket_) {
+      socket_->pauseRead();
+      socket_->close();
+      socket_.reset();
+    }
     evb_->terminateLoopSoon();
   }
 
@@ -283,28 +290,19 @@ class UDPClient : private AsyncUDPSocket::ReadCallback, private AsyncTimeout {
     sendPing();
   }
 
-  int pongRecvd() const {
-    return pongRecvd_;
-  }
+  int pongRecvd() const { return pongRecvd_; }
 
-  AsyncUDPSocket& getSocket() {
-    return *socket_;
-  }
+  AsyncUDPSocket& getSocket() { return *socket_; }
 
   void setShouldConnect(
-      const folly::SocketAddress& connectAddr,
-      BindSocket bindSocket) {
+      const folly::SocketAddress& connectAddr, BindSocket bindSocket) {
     connectAddr_ = connectAddr;
     bindSocket_ = bindSocket;
   }
 
-  bool error() const {
-    return error_;
-  }
+  bool error() const { return error_; }
 
-  void incrementPongCount(int n) {
-    pongRecvd_ += n;
-  }
+  void incrementPongCount(int n) { pongRecvd_ += n; }
 
  protected:
   folly::Optional<folly::SocketAddress> connectAddr_;
@@ -327,14 +325,10 @@ class UDPNotifyClient : public UDPClient {
   ~UDPNotifyClient() override = default;
 
   explicit UDPNotifyClient(
-      EventBase* evb,
-      bool useRecvmmsg = false,
-      unsigned int numMsgs = 1)
+      EventBase* evb, bool useRecvmmsg = false, unsigned int numMsgs = 1)
       : UDPClient(evb), useRecvmmsg_(useRecvmmsg), numMsgs_(numMsgs) {}
 
-  bool shouldOnlyNotify() override {
-    return true;
-  }
+  bool shouldOnlyNotify() override { return true; }
 
   void onRecvMsg(AsyncUDPSocket& sock) {
     struct msghdr msg;
@@ -487,10 +481,10 @@ class AsyncSocketIntegrationTest : public Test {
       folly::Optional<folly::SocketAddress> connectedAddress,
       BindSocket bindSocket = BindSocket::YES);
 
-  folly::EventBase sevb;
-  folly::EventBase cevb;
   std::unique_ptr<std::thread> serverThread;
   std::unique_ptr<UDPServer> server;
+  folly::EventBase sevb;
+  folly::EventBase cevb;
 };
 
 std::unique_ptr<UDPClient> AsyncSocketIntegrationTest::performPingPongTest(
@@ -601,8 +595,7 @@ TEST_P(ConnectedAsyncSocketIntegrationTest, ConnectedPingPong) {
 }
 
 TEST_P(
-    ConnectedAsyncSocketIntegrationTest,
-    ConnectedPingPongServerWrongAddress) {
+    ConnectedAsyncSocketIntegrationTest, ConnectedPingPongServerWrongAddress) {
   server->setChangePortForWrites(true);
   startServer();
   auto pingClient =
@@ -612,8 +605,7 @@ TEST_P(
 }
 
 TEST_P(
-    ConnectedAsyncSocketIntegrationTest,
-    ConnectedPingPongClientWrongAddress) {
+    ConnectedAsyncSocketIntegrationTest, ConnectedPingPongClientWrongAddress) {
   server->setChangePortForWrites(false);
   startServer();
   folly::SocketAddress connectAddr(
@@ -639,7 +631,7 @@ TEST_P(
   EXPECT_TRUE(pingClient->error());
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     ConnectedAsyncSocketIntegrationTests,
     ConnectedAsyncSocketIntegrationTest,
     Values(BindSocket::YES, BindSocket::NO));
@@ -665,9 +657,7 @@ class MockErrMessageCallback : public AsyncUDPSocket::ErrMessageCallback {
   ~MockErrMessageCallback() override = default;
 
   MOCK_METHOD1(errMessage_, void(const cmsghdr&));
-  void errMessage(const cmsghdr& cmsg) noexcept override {
-    errMessage_(cmsg);
-  }
+  void errMessage(const cmsghdr& cmsg) noexcept override { errMessage_(cmsg); }
 
   MOCK_METHOD1(errMessageError_, void(const folly::AsyncSocketException&));
   void errMessageError(
@@ -708,9 +698,7 @@ class MockUDPReadCallback : public AsyncUDPSocket::ReadCallback {
   }
 
   MOCK_METHOD0(onReadClosed_, void());
-  void onReadClosed() noexcept override {
-    onReadClosed_();
-  }
+  void onReadClosed() noexcept override { onReadClosed_(); }
 };
 
 class AsyncUDPSocketTest : public Test {

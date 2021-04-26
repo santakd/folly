@@ -30,9 +30,11 @@
 #include <folly/ConstexprMath.h>
 #include <folly/Likely.h>
 #include <folly/Traits.h>
+#include <folly/Utility.h>
 #include <folly/functional/Invoke.h>
 #include <folly/lang/Align.h>
 #include <folly/lang/Exception.h>
+#include <folly/lang/Thunk.h>
 #include <folly/memory/Malloc.h>
 #include <folly/portability/Config.h>
 #include <folly/portability/Malloc.h>
@@ -198,8 +200,7 @@ template <
     typename Alloc,
     size_t kAlign = alignof(typename std::allocator_traits<Alloc>::value_type)>
 typename std::allocator_traits<Alloc>::pointer allocateOverAligned(
-    Alloc const& alloc,
-    size_t n) {
+    Alloc const& alloc, size_t n) {
   void* raw = nullptr;
   detail::rawOverAlignedImpl<Alloc, kAlign, true>(alloc, n, raw);
   return std::pointer_traits<typename std::allocator_traits<Alloc>::pointer>::
@@ -298,9 +299,7 @@ make_unique(Args&&...) = delete;
 
 template <typename T, void (*f)(T*)>
 struct static_function_deleter {
-  void operator()(T* t) const {
-    f(t);
-  }
+  void operator()(T* t) const { f(t); }
 };
 
 /**
@@ -327,6 +326,14 @@ std::shared_ptr<T> to_shared_ptr(std::unique_ptr<T, D>&& ptr) {
 }
 
 /**
+ *  to_shared_ptr_aliasing
+ */
+template <typename T, typename U>
+std::shared_ptr<U> to_shared_ptr_aliasing(std::shared_ptr<T> const& r, U* ptr) {
+  return std::shared_ptr<U>(r, ptr);
+}
+
+/**
  *  to_weak_ptr
  *
  *  Make a weak_ptr and return it from a shared_ptr without specifying the
@@ -346,7 +353,55 @@ std::shared_ptr<T> to_shared_ptr(std::unique_ptr<T, D>&& ptr) {
  */
 template <typename T>
 std::weak_ptr<T> to_weak_ptr(const std::shared_ptr<T>& ptr) {
-  return std::weak_ptr<T>(ptr);
+  return ptr;
+}
+
+#if __GLIBCXX__
+namespace detail {
+void weak_ptr_set_stored_ptr(std::weak_ptr<void>& w, void* ptr);
+
+template <typename Tag, void* std::__weak_ptr<void>::*WeakPtr_Ptr_Field>
+struct GenerateWeakPtrInternalsAccessor {
+  friend void weak_ptr_set_stored_ptr(std::weak_ptr<void>& w, void* ptr) {
+    w.*WeakPtr_Ptr_Field = ptr;
+  }
+};
+
+// Each template instantiation of GenerateWeakPtrInternalsAccessor must
+// be a new type, to avoid ODR problems.  We do this by tagging it with
+// a type from an anon namespace.
+namespace {
+struct MemoryAnonTag {};
+} // namespace
+
+template struct GenerateWeakPtrInternalsAccessor<
+    MemoryAnonTag,
+    &std::__weak_ptr<void>::_M_ptr>;
+} // namespace detail
+#endif
+
+/**
+ *  to_weak_ptr_aliasing
+ *
+ *  Like to_weak_ptr, but arranges that lock().get() on the returned
+ *  pointer points to ptr rather than r.get().
+ *
+ *  Equivalent to:
+ *
+ *      to_weak_ptr(std::shared_ptr<U>(r, ptr))
+ *
+ *  For libstdc++, ABI-specific tricks are used to optimize the
+ *  implementation.
+ */
+template <typename T, typename U>
+std::weak_ptr<U> to_weak_ptr_aliasing(const std::shared_ptr<T>& r, U* ptr) {
+#if __GLIBCXX__
+  std::weak_ptr<void> wv(r);
+  detail::weak_ptr_set_stored_ptr(wv, ptr);
+  return reinterpret_cast<std::weak_ptr<U>&&>(wv);
+#else
+  return std::shared_ptr<U>(r, ptr);
+#endif
 }
 
 /**
@@ -373,16 +428,50 @@ std::shared_ptr<remove_cvref_t<T>> copy_to_shared_ptr(T&& t) {
   return std::make_shared<remove_cvref_t<T>>(static_cast<T&&>(t));
 }
 
-namespace detail {
+//  erased_unique_ptr
+//
+//  A type-erased smart-ptr with unique ownership to a heap-allocated object.
+using erased_unique_ptr = std::unique_ptr<void, void (*)(void*)>;
+
+//  to_erased_unique_ptr
+//
+//  Converts an owning pointer to an object to an erased_unique_ptr.
 template <typename T>
-struct lift_void_to_char {
-  using type = T;
-};
-template <>
-struct lift_void_to_char<void> {
-  using type = char;
-};
-} // namespace detail
+erased_unique_ptr to_erased_unique_ptr(T* const ptr) noexcept {
+  return {ptr, detail::thunk::ruin<T>};
+}
+
+//  to_erased_unique_ptr
+//
+//  Converts an owning std::unique_ptr to an erased_unique_ptr.
+template <typename T>
+erased_unique_ptr to_erased_unique_ptr(std::unique_ptr<T> ptr) noexcept {
+  return to_erased_unique_ptr(ptr.release());
+}
+
+//  make_erased_unique
+//
+//  Allocate an object of the T on the heap, constructed with a..., and return
+//  an owning erased_unique_ptr to it.
+template <typename T, typename... A>
+erased_unique_ptr make_erased_unique(A&&... a) {
+  return to_erased_unique_ptr(std::make_unique<T>(static_cast<A&&>(a)...));
+}
+
+//  copy_to_erased_unique_ptr
+//
+//  Copy an object to the heap and return an owning erased_unique_ptr to it.
+template <typename T>
+erased_unique_ptr copy_to_erased_unique_ptr(T&& obj) {
+  return to_erased_unique_ptr(copy_to_unique_ptr(static_cast<T&&>(obj)));
+}
+
+//  empty_erased_unique_ptr
+//
+//  Return an empty erased_unique_ptr.
+inline erased_unique_ptr empty_erased_unique_ptr() {
+  return {nullptr, nullptr};
+}
 
 /**
  * SysAllocator
@@ -406,24 +495,16 @@ class SysAllocator {
   constexpr SysAllocator(SysAllocator<U> const&) noexcept {}
 
   T* allocate(size_t count) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    auto const p = std::malloc(sizeof(lifted) * count);
+    auto const p = std::malloc(sizeof(T) * count);
     if (!p) {
       throw_exception<std::bad_alloc>();
     }
     return static_cast<T*>(p);
   }
-  void deallocate(T* p, size_t count) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    sizedFree(p, count * sizeof(lifted));
-  }
+  void deallocate(T* p, size_t count) { sizedFree(p, count * sizeof(T)); }
 
-  friend bool operator==(Self const&, Self const&) noexcept {
-    return true;
-  }
-  friend bool operator!=(Self const&, Self const&) noexcept {
-    return false;
-  }
+  friend bool operator==(Self const&, Self const&) noexcept { return true; }
+  friend bool operator!=(Self const&, Self const&) noexcept { return false; }
 };
 
 class DefaultAlign {
@@ -436,9 +517,7 @@ class DefaultAlign {
     assert(!(align_ < sizeof(void*)) && bool("bad align: too small"));
     assert(!(align_ & (align_ - 1)) && bool("bad align: not power-of-two"));
   }
-  std::size_t operator()() const noexcept {
-    return align_;
-  }
+  std::size_t operator()() const noexcept { return align_; }
 
   friend bool operator==(Self const& a, Self const& b) noexcept {
     return a.align_ == b.align_;
@@ -456,16 +535,10 @@ class FixedAlign {
   using Self = FixedAlign<Align>;
 
  public:
-  constexpr std::size_t operator()() const noexcept {
-    return Align;
-  }
+  constexpr std::size_t operator()() const noexcept { return Align; }
 
-  friend bool operator==(Self const&, Self const&) noexcept {
-    return true;
-  }
-  friend bool operator!=(Self const&, Self const&) noexcept {
-    return false;
-  }
+  friend bool operator==(Self const&, Self const&) noexcept { return true; }
+  friend bool operator!=(Self const&, Self const&) noexcept { return false; }
 };
 
 /**
@@ -492,9 +565,7 @@ class AlignedSysAllocator : private Align {
   template <typename, typename>
   friend class AlignedSysAllocator;
 
-  constexpr Align const& align() const {
-    return *this;
-  }
+  constexpr Align const& align() const { return *this; }
 
  public:
   static_assert(std::is_nothrow_copy_constructible<Align>::value, "");
@@ -522,9 +593,8 @@ class AlignedSysAllocator : private Align {
       : Align(other.align()) {}
 
   T* allocate(size_t count) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    auto const a = align()() < alignof(lifted) ? alignof(lifted) : align()();
-    auto const p = aligned_malloc(sizeof(lifted) * count, a);
+    auto const a = align()() < alignof(T) ? alignof(T) : align()();
+    auto const p = aligned_malloc(sizeof(T) * count, a);
     if (!p) {
       if (FOLLY_UNLIKELY(errno != ENOMEM)) {
         std::terminate();
@@ -533,9 +603,7 @@ class AlignedSysAllocator : private Align {
     }
     return static_cast<T*>(p);
   }
-  void deallocate(T* p, size_t /* count */) {
-    aligned_free(p);
-  }
+  void deallocate(T* p, size_t /* count */) { aligned_free(p); }
 
   friend bool operator==(Self const& a, Self const& b) noexcept {
     return a.align() == b.align();
@@ -556,12 +624,12 @@ class AlignedSysAllocator : private Align {
  *
  * Note that Inner is *not* a C++ Allocator.
  */
-template <typename T, class Inner>
-class CxxAllocatorAdaptor {
+template <typename T, class Inner, bool FallbackToStdAlloc = false>
+class CxxAllocatorAdaptor : private std::allocator<T> {
  private:
-  using Self = CxxAllocatorAdaptor<T, Inner>;
+  using Self = CxxAllocatorAdaptor<T, Inner, FallbackToStdAlloc>;
 
-  template <typename U, typename UAlloc>
+  template <typename U, typename UInner, bool UFallback>
   friend class CxxAllocatorAdaptor;
 
   Inner* inner_ = nullptr;
@@ -573,27 +641,32 @@ class CxxAllocatorAdaptor {
   using propagate_on_container_move_assignment = std::true_type;
   using propagate_on_container_swap = std::true_type;
 
-  constexpr explicit CxxAllocatorAdaptor() = default;
+  template <bool X = FallbackToStdAlloc, std::enable_if_t<X, int> = 0>
+  constexpr explicit CxxAllocatorAdaptor() {}
 
   constexpr explicit CxxAllocatorAdaptor(Inner& ref) : inner_(&ref) {}
 
   constexpr CxxAllocatorAdaptor(CxxAllocatorAdaptor const&) = default;
 
   template <typename U, std::enable_if_t<!std::is_same<U, T>::value, int> = 0>
-  constexpr CxxAllocatorAdaptor(CxxAllocatorAdaptor<U, Inner> const& other)
+  constexpr CxxAllocatorAdaptor(
+      CxxAllocatorAdaptor<U, Inner, FallbackToStdAlloc> const& other)
       : inner_(other.inner_) {}
 
   T* allocate(std::size_t n) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    if (inner_ == nullptr) {
-      throw_exception<std::bad_alloc>();
+    if (FallbackToStdAlloc && inner_ == nullptr) {
+      return std::allocator<T>::allocate(n);
     }
-    return static_cast<T*>(inner_->allocate(sizeof(lifted) * n));
+    return static_cast<T*>(inner_->allocate(sizeof(T) * n));
   }
+
   void deallocate(T* p, std::size_t n) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    assert(inner_);
-    inner_->deallocate(p, sizeof(lifted) * n);
+    if (inner_ != nullptr) {
+      inner_->deallocate(p, sizeof(T) * n);
+    } else {
+      assert(FallbackToStdAlloc);
+      std::allocator<T>::deallocate(p, n);
+    }
   }
 
   friend bool operator==(Self const& a, Self const& b) noexcept {
@@ -602,6 +675,11 @@ class CxxAllocatorAdaptor {
   friend bool operator!=(Self const& a, Self const& b) noexcept {
     return a.inner_ != b.inner_;
   }
+
+  template <typename U>
+  struct rebind {
+    using other = CxxAllocatorAdaptor<U, Inner, FallbackToStdAlloc>;
+  };
 };
 
 /*
@@ -637,9 +715,7 @@ class allocator_delete : private std::remove_reference<Alloc>::type {
   allocator_delete(const allocator_delete<U>& other)
       : allocator_type(other.get_allocator()) {}
 
-  allocator_type const& get_allocator() const {
-    return *this;
-  }
+  allocator_type const& get_allocator() const { return *this; }
 
   void operator()(pointer p) const {
     auto alloc = get_allocator();
@@ -653,8 +729,7 @@ class allocator_delete : private std::remove_reference<Alloc>::type {
  */
 template <typename T, typename Alloc, typename... Args>
 std::unique_ptr<T, allocator_delete<Alloc>> allocate_unique(
-    Alloc const& alloc,
-    Args&&... args) {
+    Alloc const& alloc, Args&&... args) {
   using traits = std::allocator_traits<Alloc>;
   struct DeferCondDeallocate {
     bool& cond;
@@ -678,9 +753,7 @@ std::unique_ptr<T, allocator_delete<Alloc>> allocate_unique(
 }
 
 struct SysBufferDeleter {
-  void operator()(void* ptr) {
-    std::free(ptr);
-  }
+  void operator()(void* ptr) { std::free(ptr); }
 };
 using SysBufferUniquePtr = std::unique_ptr<void, SysBufferDeleter>;
 

@@ -16,8 +16,6 @@
 
 #include <folly/Portability.h>
 
-#if FOLLY_HAS_COROUTINES
-
 #include <folly/CancellationToken.h>
 #include <folly/ScopeGuard.h>
 #include <folly/experimental/coro/AsyncGenerator.h>
@@ -29,6 +27,8 @@
 #include <folly/experimental/coro/Task.h>
 
 #include <folly/portability/GTest.h>
+
+#if FOLLY_HAS_COROUTINES
 
 using namespace folly::coro;
 
@@ -72,9 +72,7 @@ TEST_F(MergeTest, TruncateStream) {
           co_invoke([&]() -> AsyncGenerator<AsyncGenerator<int>> {
             auto makeGenerator = [&]() -> AsyncGenerator<int> {
               ++started;
-              SCOPE_EXIT {
-                ++completed;
-              };
+              SCOPE_EXIT { ++completed; };
               co_yield 1;
               co_await co_reschedule_on_current_executor;
               co_yield 2;

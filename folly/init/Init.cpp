@@ -24,7 +24,7 @@
 #include <folly/portability/Config.h>
 #include <folly/synchronization/HazptrThreadPoolExecutor.h>
 
-#if FOLLY_USE_SYMBOLIZER
+#if !defined(_WIN32) && !defined(__XROS__)
 #include <folly/experimental/symbolizer/SignalHandler.h> // @manual
 #endif
 #include <folly/portability/GFlags.h>
@@ -33,7 +33,7 @@ DEFINE_string(logging, "", "Logging configuration");
 
 namespace folly {
 const unsigned long kAllFatalSignals =
-#if FOLLY_USE_SYMBOLIZER
+#if !defined(_WIN32) && !defined(__XROS__)
     symbolizer::kAllFatalSignals;
 #else
     0;
@@ -48,12 +48,10 @@ void init(int* argc, char*** argv, bool removeFlags) {
 }
 
 void init(int* argc, char*** argv, InitOptions options) {
-#if FOLLY_USE_SYMBOLIZER
+#if !defined(_WIN32) && !defined(__XROS__)
   // Install the handler now, to trap errors received during startup.
   // The callbacks, if any, can be installed later
   folly::symbolizer::installFatalSignalHandler(options.fatal_signals);
-#elif !defined(_WIN32)
-  google::InstallFailureSignalHandler();
 #endif
 
   // Indicate ProcessPhase::Regular and register handler to
@@ -67,7 +65,9 @@ void init(int* argc, char*** argv, InitOptions options) {
 #if !FOLLY_HAVE_LIBGFLAGS
   (void)options;
 #else
-  gflags::ParseCommandLineFlags(argc, argv, options.remove_flags);
+  if (options.use_gflags) {
+    gflags::ParseCommandLineFlags(argc, argv, options.remove_flags);
+  }
 #endif
 
   folly::initLoggingOrDie(FLAGS_logging);

@@ -15,7 +15,8 @@
  */
 
 #include <folly/experimental/coro/detail/Malloc.h>
-#include <folly/Benchmark.h>
+
+#include <folly/BenchmarkUtil.h>
 
 #include <new>
 

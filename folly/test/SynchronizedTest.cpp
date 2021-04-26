@@ -19,6 +19,7 @@
 // Test bed for folly/Synchronized.h
 
 #include <folly/Synchronized.h>
+
 #include <folly/Function.h>
 #include <folly/Portability.h>
 #include <folly/ScopeGuard.h>
@@ -51,7 +52,7 @@ using SynchronizedTestTypes = testing::Types<
     folly::RWTicketSpinLock64,
 #endif
     folly::SpinLock>;
-TYPED_TEST_CASE(SynchronizedTest, SynchronizedTestTypes);
+TYPED_TEST_SUITE(SynchronizedTest, SynchronizedTestTypes);
 
 TYPED_TEST(SynchronizedTest, Basic) {
   testBasic<TypeParam>();
@@ -115,7 +116,7 @@ using SynchronizedTimedTestTypes = testing::Types<
 #endif
     folly::SharedMutexReadPriority,
     folly::SharedMutexWritePriority>;
-TYPED_TEST_CASE(SynchronizedTimedTest, SynchronizedTimedTestTypes);
+TYPED_TEST_SUITE(SynchronizedTimedTest, SynchronizedTimedTestTypes);
 
 TYPED_TEST(SynchronizedTimedTest, Timed) {
   testTimed<TypeParam>();
@@ -131,9 +132,8 @@ using SynchronizedTimedWithConstTestTypes = testing::Types<
 #endif
     folly::SharedMutexReadPriority,
     folly::SharedMutexWritePriority>;
-TYPED_TEST_CASE(
-    SynchronizedTimedWithConstTest,
-    SynchronizedTimedWithConstTestTypes);
+TYPED_TEST_SUITE(
+    SynchronizedTimedWithConstTest, SynchronizedTimedWithConstTestTypes);
 
 TYPED_TEST(SynchronizedTimedWithConstTest, TimedShared) {
   testTimedShared<TypeParam>();
@@ -143,13 +143,9 @@ using CountPair = std::pair<int, int>;
 // This class is specialized only to be uesed in SynchronizedLockTest
 class FakeMutex {
  public:
-  void lock() {
-    ++lockCount_;
-  }
+  void lock() { ++lockCount_; }
 
-  void unlock() {
-    ++unlockCount_;
-  }
+  void unlock() { ++unlockCount_; }
 
   static CountPair getLockUnlockCount() {
     return CountPair{lockCount_, unlockCount_};
@@ -164,19 +160,17 @@ class FakeMutex {
   // Keep these two static for test access
   // Keep them thread_local in case of tests are run in parallel within one
   // process
-  static FOLLY_TLS int lockCount_;
-  static FOLLY_TLS int unlockCount_;
+  static thread_local int lockCount_;
+  static thread_local int unlockCount_;
 };
-FOLLY_TLS int FakeMutex::lockCount_{0};
-FOLLY_TLS int FakeMutex::unlockCount_{0};
+thread_local int FakeMutex::lockCount_{0};
+thread_local int FakeMutex::unlockCount_{0};
 
 // SynchronizedLockTest is used to verify the correct lock unlock behavior
 // happens per design
 class SynchronizedLockTest : public testing::Test {
  public:
-  void SetUp() override {
-    FakeMutex::resetLockUnlockCount();
-  }
+  void SetUp() override { FakeMutex::resetLockUnlockCount(); }
 };
 
 /**
@@ -266,24 +260,12 @@ static FakeAllPowerfulAssertingMutexInternal globalAllPowerfulAssertingMutex;
 
 class FakeAllPowerfulAssertingMutex {
  public:
-  void lock() {
-    globalAllPowerfulAssertingMutex.lock();
-  }
-  void unlock() {
-    globalAllPowerfulAssertingMutex.unlock();
-  }
-  void lock_shared() {
-    globalAllPowerfulAssertingMutex.lock_shared();
-  }
-  void unlock_shared() {
-    globalAllPowerfulAssertingMutex.unlock_shared();
-  }
-  void lock_upgrade() {
-    globalAllPowerfulAssertingMutex.lock_upgrade();
-  }
-  void unlock_upgrade() {
-    globalAllPowerfulAssertingMutex.unlock_upgrade();
-  }
+  void lock() { globalAllPowerfulAssertingMutex.lock(); }
+  void unlock() { globalAllPowerfulAssertingMutex.unlock(); }
+  void lock_shared() { globalAllPowerfulAssertingMutex.lock_shared(); }
+  void unlock_shared() { globalAllPowerfulAssertingMutex.unlock_shared(); }
+  void lock_upgrade() { globalAllPowerfulAssertingMutex.lock_upgrade(); }
+  void unlock_upgrade() { globalAllPowerfulAssertingMutex.unlock_upgrade(); }
 
   void unlock_upgrade_and_lock() {
     globalAllPowerfulAssertingMutex.unlock_upgrade_and_lock();
@@ -322,9 +304,7 @@ class FakeAllPowerfulAssertingMutex {
 
 class NonDefaultConstructibleMutex {
  public:
-  explicit NonDefaultConstructibleMutex(int valueIn) {
-    value = valueIn;
-  }
+  explicit NonDefaultConstructibleMutex(int valueIn) { value = valueIn; }
   NonDefaultConstructibleMutex() = delete;
   NonDefaultConstructibleMutex(const NonDefaultConstructibleMutex&) = delete;
   NonDefaultConstructibleMutex(NonDefaultConstructibleMutex&&) = delete;
@@ -579,9 +559,7 @@ class TryLockable {
         onLock{std::move(onLockIn)},
         onUnlock{std::move(onUnlockIn)} {}
 
-  void lock() {
-    EXPECT_TRUE(false);
-  }
+  void lock() { EXPECT_TRUE(false); }
   template <
       int LockableType = kLockableType,
       std::enable_if_t<LockableType != kLockable>* = nullptr>
@@ -620,25 +598,13 @@ class TryLockable {
     EXPECT_TRUE(false);
   }
 
-  bool try_lock() {
-    return tryLockImpl(kLockable | kWLockable);
-  }
-  bool try_lock_shared() {
-    return tryLockImpl(kRLockable);
-  }
-  bool try_lock_upgrade() {
-    return tryLockImpl(kULockable);
-  }
+  bool try_lock() { return tryLockImpl(kLockable | kWLockable); }
+  bool try_lock_shared() { return tryLockImpl(kRLockable); }
+  bool try_lock_upgrade() { return tryLockImpl(kULockable); }
 
-  void unlock() {
-    unlockImpl(kLockable | kWLockable);
-  }
-  void unlock_shared() {
-    unlockImpl(kLockable | kRLockable);
-  }
-  void unlock_upgrade() {
-    unlockImpl(kLockable | kULockable);
-  }
+  void unlock() { unlockImpl(kLockable | kWLockable); }
+  void unlock_shared() { unlockImpl(kLockable | kRLockable); }
+  void unlock_upgrade() { unlockImpl(kLockable | kULockable); }
 
   const bool kShouldSucceed;
   folly::Function<void()> onLock;
@@ -647,18 +613,10 @@ class TryLockable {
 
 struct TestSharedMutex {
  public:
-  void lock() {
-    onLock_();
-  }
-  void unlock() {
-    onUnlock_();
-  }
-  void lock_shared() {
-    onLockShared_();
-  }
-  void unlock_shared() {
-    onUnlockShared_();
-  }
+  void lock() { onLock_(); }
+  void unlock() { onUnlock_(); }
+  void lock_shared() { onLockShared_(); }
+  void unlock_shared() { onUnlockShared_(); }
 
   bool try_lock() {
     onLock_();
@@ -708,7 +666,8 @@ void testTryLock(Func func) {
     folly::Synchronized<int, TryLockable<kLockable>> synchronized{
         std::piecewise_construct,
         std::make_tuple(),
-        std::make_tuple(true, [&] { ++locked; }, [&] { ++unlocked; })};
+        std::make_tuple(
+            true, [&] { ++locked; }, [&] { ++unlocked; })};
 
     {
       auto lock = func(synchronized);
@@ -724,7 +683,8 @@ void testTryLock(Func func) {
     folly::Synchronized<int, TryLockable<kLockable>> synchronized{
         std::piecewise_construct,
         std::make_tuple(),
-        std::make_tuple(false, [&] { ++locked; }, [&] { ++unlocked; })};
+        std::make_tuple(
+            false, [&] { ++locked; }, [&] { ++unlocked; })};
 
     {
       auto lock = func(synchronized);
@@ -743,9 +703,7 @@ class MutexTrack {
 
   void lock_shared() {}
   void unlock_shared() {}
-  void lock() {
-    order = MutexTrack::gOrder++;
-  }
+  void lock() { order = MutexTrack::gOrder++; }
   void unlock() {
     order = -1;
     --gOrder;

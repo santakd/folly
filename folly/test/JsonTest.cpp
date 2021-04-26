@@ -26,6 +26,7 @@ using folly::parseJson;
 using folly::parseJsonWithMetadata;
 using folly::toJson;
 using folly::json::parse_error;
+using folly::json::print_error;
 
 TEST(Json, Unicode) {
   auto val = parseJson(u8"\"I \u2665 UTF-8\"");
@@ -389,7 +390,7 @@ TEST(Json, Produce) {
 
   // We're not allowed to have non-string keys in json.
   EXPECT_THROW(
-      toJson(dynamic::object("abc", "xyz")(42.33, "asd")), parse_error);
+      toJson(dynamic::object("abc", "xyz")(42.33, "asd")), print_error);
 
   // Check Infinity/Nan
   folly::json::serialization_opts opts;
@@ -573,6 +574,8 @@ TEST(Json, UTF8Validation) {
   // test validate_utf8 with invalid utf8
   EXPECT_ANY_THROW(folly::json::serialize("a\xe0\xa0\x80z\xc0\x80", opts));
   EXPECT_ANY_THROW(folly::json::serialize("a\xe0\xa0\x80z\xe0\x80\x80", opts));
+  // not a valid unicode because it is larger than the max 0x10FFFF code-point
+  EXPECT_ANY_THROW(folly::json::serialize("\xF6\x8D\x9B\xBC", opts));
 
   opts.skip_invalid_utf8 = true;
   EXPECT_EQ(
@@ -584,6 +587,12 @@ TEST(Json, UTF8Validation) {
   EXPECT_EQ(
       folly::json::serialize("z\xc0\x80z\xe0\xa0\x80", opts),
       u8"\"z\ufffd\ufffdz\xe0\xa0\x80\"");
+  EXPECT_EQ(
+      folly::json::serialize("\xF6\x8D\x9B\xBC", opts),
+      u8"\"\ufffd\ufffd\ufffd\ufffd\"");
+  EXPECT_EQ(
+      folly::json::serialize("invalid\xF6\x8D\x9B\xBCinbetween", opts),
+      u8"\"invalid\ufffd\ufffd\ufffd\ufffdinbetween\"");
 
   opts.encode_non_ascii = true;
   EXPECT_EQ(
@@ -787,6 +796,41 @@ TEST(Json, SortKeys) {
   EXPECT_NE(sorted_keys, folly::json::serialize(value, opts_off));
   EXPECT_EQ(
       inverse_sorted_keys, folly::json::serialize(value, opts_custom_sort));
+}
+
+TEST(Json, PrettyPrintIndent) {
+  folly::json::serialization_opts opts;
+  opts.sort_keys = true;
+  opts.pretty_formatting = true;
+  opts.pretty_formatting_indent_width = 4;
+
+  // clang-format off
+  dynamic value = dynamic::object
+    ("foo", "bar")
+    ("nested",
+      dynamic::object
+        ("abc", "def")
+        ("qrs", dynamic::array("tuv", 789))
+        ("xyz", 123)
+    )
+    ("zzz", 456)
+    ;
+  // clang-format on
+
+  std::string expected = R"({
+    "foo": "bar",
+    "nested": {
+        "abc": "def",
+        "qrs": [
+            "tuv",
+            789
+        ],
+        "xyz": 123
+    },
+    "zzz": 456
+})";
+
+  EXPECT_EQ(expected, folly::json::serialize(value, opts));
 }
 
 TEST(Json, PrintTo) {

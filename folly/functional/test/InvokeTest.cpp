@@ -29,30 +29,18 @@ struct from_any {
 };
 
 struct Fn {
-  char operator()(int, int) noexcept {
-    return 'a';
-  }
-  int volatile&& operator()(int, char const*) {
-    return std::move(x_);
-  }
-  float operator()(float, float) {
-    return 3.14;
-  }
+  char operator()(int, int) noexcept { return 'a'; }
+  int volatile&& operator()(int, char const*) { return std::move(x_); }
+  float operator()(float, float) { return 3.14; }
   int volatile x_ = 17;
 };
 
 FOLLY_CREATE_MEMBER_INVOKER(test_invoker, test);
 
 struct Obj {
-  char test(int, int) noexcept {
-    return 'a';
-  }
-  int volatile&& test(int, char const*) {
-    return std::move(x_);
-  }
-  float test(float, float) {
-    return 3.14;
-  }
+  char test(int, int) noexcept { return 'a'; }
+  int volatile&& test(int, char const*) { return std::move(x_); }
+  float test(float, float) { return 3.14; }
   int volatile x_ = 17;
 };
 
@@ -84,7 +72,7 @@ struct Obj {
 void swap(Obj&, Obj&) noexcept {} // no-op
 } // namespace swappable
 
-struct AltSwappable;
+struct AltSwappable {};
 struct AltSwappableRet {};
 namespace unswappable {
 FOLLY_MAYBE_UNUSED AltSwappableRet swap(AltSwappable&, AltSwappable&);
@@ -283,16 +271,12 @@ FOLLY_CREATE_STATIC_MEMBER_INVOKER(stat_invoker, stat);
 
 TEST_F(InvokeTest, static_member_invoke) {
   struct HasStat {
-    static char stat(int, int) noexcept {
-      return 'a';
-    }
+    static char stat(int, int) noexcept { return 'a'; }
     static int volatile&& stat(int, char const*) {
       static int volatile x_ = 17;
       return std::move(x_);
     }
-    static float stat(float, float) {
-      return 3.14;
-    }
+    static float stat(float, float) { return 3.14; }
   };
   using traits = folly::invoke_traits<stat_invoker<HasStat>>;
 
@@ -314,6 +298,24 @@ TEST_F(InvokeTest, static_member_invoke) {
   EXPECT_FALSE((traits::is_nothrow_invocable_r_v<int, int>));
 }
 
+TEST_F(InvokeTest, static_member_no_invoke) {
+  struct HasNoStat {};
+
+  using traits = folly::invoke_traits<stat_invoker<HasNoStat>>;
+
+  EXPECT_FALSE((traits::is_invocable_v<>));
+  EXPECT_FALSE((traits::is_invocable_v<int>));
+
+  EXPECT_FALSE((traits::is_invocable_r_v<int>));
+  EXPECT_FALSE((traits::is_invocable_r_v<int, int>));
+
+  EXPECT_FALSE((traits::is_nothrow_invocable_v<>));
+  EXPECT_FALSE((traits::is_nothrow_invocable_v<int>));
+
+  EXPECT_FALSE((traits::is_nothrow_invocable_r_v<int>));
+  EXPECT_FALSE((traits::is_nothrow_invocable_r_v<int, int>));
+}
+
 namespace {
 
 struct TestCustomisationPointFn {
@@ -328,14 +330,12 @@ struct TestCustomisationPointFn {
 FOLLY_DEFINE_CPO(TestCustomisationPointFn, testCustomisationPoint)
 
 struct TypeA {
-  constexpr friend int
-  tag_invoke(folly::cpo_t<testCustomisationPoint>, const TypeA&, int value) {
+  constexpr friend int tag_invoke(
+      folly::cpo_t<testCustomisationPoint>, const TypeA&, int value) {
     return value * 2;
   }
   constexpr friend bool tag_invoke(
-      folly::cpo_t<testCustomisationPoint>,
-      const TypeA&,
-      bool value) noexcept {
+      folly::cpo_t<testCustomisationPoint>, const TypeA&, bool value) noexcept {
     return !value;
   }
 };

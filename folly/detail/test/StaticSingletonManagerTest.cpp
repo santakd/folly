@@ -27,12 +27,8 @@ FOLLY_ATTR_WEAK void check_doit() {}
 namespace {
 template <bool Noexcept>
 struct MayThrow {
-  FOLLY_NOINLINE MayThrow() noexcept(Noexcept) {
-    check_doit();
-  }
-  FOLLY_NOINLINE ~MayThrow() {
-    check_doit();
-  }
+  FOLLY_NOINLINE MayThrow() noexcept(Noexcept) { check_doit(); }
+  FOLLY_NOINLINE ~MayThrow() { check_doit(); }
 };
 } // namespace
 
@@ -41,12 +37,10 @@ extern "C" FOLLY_KEEP int* check() {
 }
 
 extern "C" FOLLY_KEEP void* check_throw() {
-  MayThrow<false> obj;
   return &createGlobal<MayThrow<false>, void>();
 }
 
 extern "C" FOLLY_KEEP void* check_nothrow() {
-  MayThrow<false> obj;
   return &createGlobal<MayThrow<true>, void>();
 }
 
@@ -73,6 +67,11 @@ TEST_F(StaticSingletonManagerTest, example_sans_rtti) {
   auto& k = K::create<T, Tag<char*>>();
   EXPECT_NE(&i, &k);
   EXPECT_EQ(T::value, k);
+
+  static K::ArgCreate<true> m_arg{tag<T, Tag<int>>};
+  auto& m = K::create<T>(m_arg);
+  EXPECT_NE(&i, &m);
+  EXPECT_EQ(T::value, m);
 }
 
 TEST_F(StaticSingletonManagerTest, example_with_rtti) {
@@ -90,6 +89,11 @@ TEST_F(StaticSingletonManagerTest, example_with_rtti) {
   auto& k = K::create<T, Tag<char*>>();
   EXPECT_NE(&i, &k);
   EXPECT_EQ(T::value, k);
+
+  static K::ArgCreate<true> m_arg{tag<T, Tag<int>>};
+  auto& m = K::create<T>(m_arg);
+  EXPECT_NE(&i, &m);
+  EXPECT_EQ(T::value, m);
 }
 
 TEST_F(StaticSingletonManagerTest, example) {

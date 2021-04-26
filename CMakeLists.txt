@@ -38,7 +38,9 @@ set(CMAKE_MODULE_PATH
 
 # package information
 set(PACKAGE_NAME      "folly")
-set(PACKAGE_VERSION   "0.58.0-dev")
+if (NOT DEFINED PACKAGE_VERSION)
+  set(PACKAGE_VERSION   "0.58.0-dev")
+endif()
 set(PACKAGE_STRING    "${PACKAGE_NAME} ${PACKAGE_VERSION}")
 set(PACKAGE_TARNAME   "${PACKAGE_NAME}-${PACKAGE_VERSION}")
 set(PACKAGE_BUGREPORT "https://github.com/facebook/folly/issues")
@@ -70,6 +72,9 @@ set(FOLLY_SUPPORT_SHARED_LIBRARY "${BUILD_SHARED_LIBS}")
 
 include(FBBuildOptions)
 fb_activate_static_library_option()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   # Check target architecture
@@ -103,7 +108,7 @@ set(FOLLY_HAVE_PTHREAD "${CMAKE_USE_PTHREADS_INIT}")
 list(APPEND CMAKE_REQUIRED_LIBRARIES Threads::Threads)
 list(APPEND FOLLY_LINK_LIBRARIES Threads::Threads)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+if(MSVC)
   include(FollyCompilerMSVC)
 else()
   include(FollyCompilerUnix)
@@ -145,7 +150,6 @@ REMOVE_MATCHES_FROM_LISTS(files hfiles
   MATCHES
     "^${FOLLY_DIR}/build/"
     "^${FOLLY_DIR}/experimental/exception_tracer/"
-    "^${FOLLY_DIR}/futures/exercises/"
     "^${FOLLY_DIR}/logging/example/"
     "^${FOLLY_DIR}/(.*/)?test/"
     "^${FOLLY_DIR}/tools/"
@@ -155,9 +159,11 @@ REMOVE_MATCHES_FROM_LISTS(files hfiles
 list(REMOVE_ITEM files
   ${FOLLY_DIR}/experimental/JSONSchemaTester.cpp
   ${FOLLY_DIR}/experimental/io/HugePageUtil.cpp
+  ${FOLLY_DIR}/python/error.cpp
+  ${FOLLY_DIR}/python/executor.cpp
   ${FOLLY_DIR}/python/fibers.cpp
   ${FOLLY_DIR}/python/GILAwareManualExecutor.cpp
-  ${FOLLY_DIR}/cybld/folly/executor.cpp
+  ${FOLLY_DIR}/experimental/symbolizer/Addr2Line.cpp
 )
 list(REMOVE_ITEM hfiles
   ${FOLLY_DIR}/python/fibers.h
@@ -198,15 +204,6 @@ list(APPEND hfiles
 
 # Exclude specific sources if we do not have third-party libraries
 # required to build them.
-if (NOT FOLLY_USE_SYMBOLIZER)
-  REMOVE_MATCHES_FROM_LISTS(files hfiles
-    MATCHES
-      "^${FOLLY_DIR}/experimental/symbolizer/"
-  )
-  list(REMOVE_ITEM files
-    ${FOLLY_DIR}/SingletonStackTrace.cpp
-  )
-endif()
 if (NOT ${LIBAIO_FOUND})
   list(REMOVE_ITEM files
     ${FOLLY_DIR}/experimental/io/AsyncIO.cpp
@@ -229,10 +226,12 @@ if (NOT ${LIBAIO_FOUND} AND NOT ${LIBURING_FOUND})
   list(REMOVE_ITEM files
     ${FOLLY_DIR}/experimental/io/AsyncBase.cpp
     ${FOLLY_DIR}/experimental/io/PollIoBackend.cpp
+    ${FOLLY_DIR}/experimental/io/SimpleAsyncIO.cpp
   )
   list(REMOVE_ITEM hfiles
     ${FOLLY_DIR}/experimental/io/AsyncBase.h
     ${FOLLY_DIR}/experimental/io/PollIoBackend.h
+    ${FOLLY_DIR}/experimental/io/SimpleAsyncIO.h
   )
 endif()
 
@@ -314,7 +313,7 @@ set(PCLMUL_FILES
   ${FOLLY_DIR}/hash/detail/Crc32CombineDetail.cpp
   ${FOLLY_DIR}/hash/detail/Crc32cDetail.cpp
 )
-CHECK_CXX_COMPILER_FLAG(-mpclmul COMPILER_HAS_M_PCLMUL)
+check_cxx_compiler_flag(-mpclmul COMPILER_HAS_M_PCLMUL)
 if (COMPILER_HAS_M_PCLMUL)
   message(
     STATUS
@@ -337,6 +336,9 @@ add_library(folly_base OBJECT
   ${files} ${hfiles}
   ${CMAKE_CURRENT_BINARY_DIR}/folly/folly-config.h
 )
+if (BUILD_SHARED_LIBS)
+  set_property(TARGET folly_base PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
 auto_source_group(folly ${FOLLY_DIR} ${files} ${hfiles})
 apply_folly_compile_options_to_target(folly_base)
 # Add the generated files to the correct source group.
@@ -377,6 +379,7 @@ option(PYTHON_EXTENSIONS
 add_library(folly
   $<TARGET_OBJECTS:folly_base>
 )
+set_property(TARGET folly PROPERTY VERSION ${PACKAGE_VERSION})
 apply_folly_compile_options_to_target(folly)
 target_compile_features(folly INTERFACE cxx_generic_lambdas)
 
@@ -387,6 +390,7 @@ add_library(folly_test_util
   ${FOLLY_DIR}/test/DeterministicSchedule.cpp
   ${FOLLY_DIR}/test/JsonTestUtil.cpp
 )
+set_property(TARGET folly_test_util PROPERTY VERSION ${PACKAGE_VERSION})
 target_link_libraries(folly_test_util
   PUBLIC
     ${BOOST_LIBRARIES}
@@ -442,10 +446,19 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/libfolly.pc.gen
   @ONLY
 )
+
+# Specify target to allow resolving generator expressions requiring
+# a target for CMake >=3.19. See #1414.
+# VERSION_GREATER_EQUAL isn't available before CMake 3.7.
+if(NOT CMAKE_VERSION VERSION_LESS 3.19)
+  set(target_arg TARGET folly_deps)
+endif()
+
 file(
   GENERATE
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/libfolly.pc
   INPUT ${CMAKE_CURRENT_BINARY_DIR}/libfolly.pc.gen
+  ${target_arg}
 )
 install(
   FILES ${CMAKE_CURRENT_BINARY_DIR}/libfolly.pc
@@ -506,6 +519,8 @@ if (BUILD_TESTS)
     ${FOLLY_DIR}/io/async/test/ScopedBoundPort.h
     ${FOLLY_DIR}/io/async/test/SocketPair.cpp
     ${FOLLY_DIR}/io/async/test/SocketPair.h
+    ${FOLLY_DIR}/io/async/test/SSLUtil.cpp
+    ${FOLLY_DIR}/io/async/test/SSLUtil.h
     ${FOLLY_DIR}/io/async/test/TestSSLServer.cpp
     ${FOLLY_DIR}/io/async/test/TestSSLServer.h
     ${FOLLY_DIR}/io/async/test/TimeUtil.cpp
@@ -549,9 +564,7 @@ if (BUILD_TESTS)
       TEST access_test SOURCES AccessTest.cpp
       TEST array_test SOURCES ArrayTest.cpp
       TEST bit_iterator_test SOURCES BitIteratorTest.cpp
-      # TODO: CMake's gtest_add_tests() function currently chokes on
-      # EnumerateTest.cpp since it uses macros to define tests.
-      #TEST enumerate_test SOURCES EnumerateTest.cpp
+      TEST enumerate_test SOURCES EnumerateTest.cpp
       TEST evicting_cache_map_test SOURCES EvictingCacheMapTest.cpp
       TEST f14_fwd_test SOURCES F14FwdTest.cpp
       TEST f14_map_test SOURCES F14MapTest.cpp
@@ -764,11 +777,24 @@ if (BUILD_TESTS)
       TEST ssl_errors_test SOURCES SSLErrorsTest.cpp
 
     DIRECTORY lang/test/
-      TEST aligned_test SOURCES AlignedTest.cpp
-      TEST bits_test SOURCES BitsTest.cpp
-      TEST c_string_test SOURCES CStringTest.cpp
-      TEST cast_test SOURCES CastTest.cpp
-      TEST safe_assert_test SOURCES SafeAssertTest.cpp
+      TEST lang_aligned_test SOURCES AlignedTest.cpp
+      TEST lang_bits_test SOURCES BitsTest.cpp
+      TEST lang_byte_test SOURCES ByteTest.cpp
+      TEST lang_c_string_test SOURCES CStringTest.cpp
+      TEST lang_cast_test SOURCES CastTest.cpp
+      TEST lang_checked_math_test SOURCES CheckedMathTest.cpp
+      TEST lang_exception_test SOURCES ExceptionTest.cpp
+      TEST lang_extern_test SOURCES ExternTest.cpp
+      TEST lang_launder_test SOURCES LaunderTest.cpp
+      TEST lang_ordering_test SOURCES OrderingTest.cpp
+      TEST lang_pretty_test SOURCES PrettyTest.cpp
+      TEST lang_propagate_const_test SOURCES PropagateConstTest.cpp
+      TEST lang_r_value_reference_wrapper_test
+        SOURCES RValueReferenceWrapperTest.cpp
+      TEST lang_safe_assert_test SOURCES SafeAssertTest.cpp
+      TEST lang_to_ascii_test SOURCES ToAsciiTest.cpp
+      TEST lang_type_info_test SOURCES TypeInfoTest.cpp
+      TEST lang_uncaught_exceptions_test SOURCES UncaughtExceptionsTest.cpp
 
     DIRECTORY memory/test/
       TEST arena_test SOURCES ArenaTest.cpp
@@ -784,6 +810,7 @@ if (BUILD_TESTS)
 
     DIRECTORY portability/test/
       TEST constexpr_test SOURCES ConstexprTest.cpp
+      TEST filesystem_test SOURCES FilesystemTest.cpp
       TEST libgen-test SOURCES LibgenTest.cpp
       TEST openssl_portability_test SOURCES OpenSSLPortabilityTest.cpp
       TEST pthread_test SOURCES PThreadTest.cpp
@@ -865,7 +892,6 @@ if (BUILD_TESTS)
       TEST glog_test SOURCES GLogTest.cpp
       TEST group_varint_test SOURCES GroupVarintTest.cpp
       TEST group_varint_test_ssse3 SOURCES GroupVarintTest.cpp
-      TEST has_member_fn_traits_test SOURCES HasMemberFnTraitsTest.cpp
       TEST iterators_test SOURCES IteratorsTest.cpp
       TEST indestructible_test SOURCES IndestructibleTest.cpp
       TEST indexed_mem_pool_test BROKEN

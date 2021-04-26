@@ -29,9 +29,7 @@ struct await_iterator {
    */
   struct AwaitWrapper {
     explicit AwaitWrapper(InnerIterator it) : it_(std::move(it)) {}
-    auto operator()() {
-      return init_await((*it_)());
-    }
+    auto operator()() { return init_await((*it_)()); }
 
    private:
     InnerIterator it_;
@@ -56,17 +54,11 @@ struct await_iterator {
     return retval;
   }
 
-  bool operator==(await_iterator other) const {
-    return it_ == other.it_;
-  }
+  bool operator==(await_iterator other) const { return it_ == other.it_; }
 
-  bool operator!=(await_iterator other) const {
-    return !(*this == other);
-  }
+  bool operator!=(await_iterator other) const { return !(*this == other); }
 
-  value_type operator*() const {
-    return AwaitWrapper(it_);
-  }
+  value_type operator*() const { return AwaitWrapper(it_); }
 
  private:
   InnerIterator it_;
@@ -113,7 +105,8 @@ Async<TResult> collectAllImpl(T&& firstTask, Ts&&... tasks) {
   Baton b;
 
   auto taskFunc = [&](auto& outref, auto&& task) -> Async<void> {
-    await(executeAndMaybeAssign(outref, std::forward<decltype(task)>(task)));
+    await_async(
+        executeAndMaybeAssign(outref, std::forward<decltype(task)>(task)));
 
     --numPending;
     if (numPending == 0) {
@@ -137,7 +130,7 @@ Async<TResult> collectAllImpl(T&& firstTask, Ts&&... tasks) {
       std::forward<Ts>(tasks)...);
 
   // Use the current fiber to execute first task
-  await(taskFunc(std::get<0>(result), std::forward<T>(firstTask)));
+  await_async(taskFunc(std::get<0>(result), std::forward<T>(firstTask)));
 
   // Wait for other tasks to complete
   b.wait();
