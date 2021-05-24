@@ -14,20 +14,13 @@
  * limitations under the License.
  */
 
-#pragma once
+#include <cstring>
 
-#include <exception>
+#if !defined(__AVX2__)
 
-#include <folly/FBString.h>
+void* __folly_memcpy(
+    void* __restrict dst, const void* __restrict src, size_t size) {
+  return std::memcpy(dst, src, size);
+}
 
-namespace folly {
-
-/**
- * Debug string for an exception: include type and what(), if
- * defined.
- */
-fbstring exceptionStr(std::exception const& e);
-
-fbstring exceptionStr(std::exception_ptr const& ep);
-
-} // namespace folly
+#endif

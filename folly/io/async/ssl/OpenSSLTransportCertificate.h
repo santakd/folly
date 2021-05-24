@@ -16,18 +16,22 @@
 
 #pragma once
 
-#include <exception>
-
-#include <folly/FBString.h>
+#include <folly/io/async/AsyncTransportCertificate.h>
+#include <folly/portability/OpenSSL.h>
+#include <folly/ssl/OpenSSLPtrTypes.h>
 
 namespace folly {
 
 /**
- * Debug string for an exception: include type and what(), if
- * defined.
+ * Generic interface applications may implement to convey self or peer
+ * certificate related information.
  */
-fbstring exceptionStr(std::exception const& e);
+class OpenSSLTransportCertificate : public AsyncTransportCertificate {
+ public:
+  virtual ~OpenSSLTransportCertificate() = default;
 
-fbstring exceptionStr(std::exception_ptr const& ep);
-
+  // TODO: Once all callsites using getX509() perform dynamic casts to this
+  // OpenSSLTransportCertificate type, we can move that method to be declared
+  // here instead.
+};
 } // namespace folly

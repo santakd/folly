@@ -14,20 +14,11 @@
  * limitations under the License.
  */
 
-#pragma once
+// @author: Logan Evans <lpe@fb.com>
 
-#include <exception>
+#include <stdlib.h>
 
-#include <folly/FBString.h>
-
-namespace folly {
-
-/**
- * Debug string for an exception: include type and what(), if
- * defined.
- */
-fbstring exceptionStr(std::exception const& e);
-
-fbstring exceptionStr(std::exception_ptr const& ep);
-
-} // namespace folly
+extern "C" {
+void* __folly_memcpy(
+    void* __restrict dst, const void* __restrict src, size_t size);
+}

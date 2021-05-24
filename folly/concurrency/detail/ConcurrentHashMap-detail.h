@@ -610,7 +610,7 @@ class alignas(64) BucketTable {
         break;
       }
     }
-    DCHECK(buckets);
+    DCHECK(buckets) << "Use-after-destruction by user.";
   }
 
   template <typename MatchFunc, typename K, typename... Args>
@@ -638,7 +638,7 @@ class alignas(64) BucketTable {
       bcount = bucket_count_.load(std::memory_order_relaxed);
     }
 
-    DCHECK(buckets); // Use-after-destruction by user.
+    DCHECK(buckets) << "Use-after-destruction by user.";
     auto idx = getIdx(bcount, h);
     auto head = &buckets->buckets_[idx]();
     auto node = head->load(std::memory_order_relaxed);
@@ -716,6 +716,7 @@ class alignas(64) BucketTable {
     cur->next_.store(headnode, std::memory_order_relaxed);
     head->store(cur, std::memory_order_release);
     it.setNode(cur, buckets, bcount, idx);
+    haznode.reset(cur);
     return true;
   }
 
