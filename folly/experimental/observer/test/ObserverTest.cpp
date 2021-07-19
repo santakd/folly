@@ -152,61 +152,33 @@ TEST(Observer, NullValue) {
 }
 
 TEST(Observer, Cycle) {
-  SimpleObservable<int> observable(0);
-  auto observer = observable.getObserver();
-  folly::Optional<Observer<int>> observerB;
-
-  auto observerA = makeObserver([observer, &observerB]() {
-    auto value = **observer;
-    if (value == 1) {
-      **observerB;
-    }
-    return value;
-  });
-
-  observerB = makeObserver([observerA]() { return **observerA; });
-
-  auto collectObserver = makeObserver([observer, observerA, &observerB]() {
-    auto value = **observer;
-    auto valueA = **observerA;
-    auto valueB = ***observerB;
-
-    if (value == 1) {
-      if (valueA == 0) {
-        EXPECT_EQ(0, valueB);
-      } else {
-        EXPECT_EQ(1, valueA);
-        EXPECT_EQ(0, valueB);
-      }
-    } else if (value == 2) {
-      EXPECT_EQ(value, valueA);
-      EXPECT_TRUE(valueB == 0 || valueB == 2);
-    } else {
-      EXPECT_EQ(value, valueA);
-      EXPECT_EQ(value, valueB);
-    }
-
-    return value;
-  });
-
-  folly::Baton<> baton;
-  auto waitingObserver = makeObserver([collectObserver, &baton]() {
-    *collectObserver;
-    baton.post();
-    return folly::Unit();
-  });
-
-  baton.reset();
-  EXPECT_EQ(0, **collectObserver);
-
-  for (size_t i = 1; i <= 3; ++i) {
-    observable.setValue(i);
-
-    EXPECT_TRUE(baton.try_wait_for(std::chrono::seconds{1}));
-    baton.reset();
-
-    EXPECT_EQ(i, **collectObserver);
+  if (!folly::kIsDebug) {
+    // Cycle detection is only available in debug builds
+    return;
   }
+
+  EXPECT_DEATH(
+      [] {
+        SimpleObservable<bool> observable(false);
+        folly::Optional<Observer<int>> observerB;
+
+        auto observerA =
+            makeObserver([observer = observable.getObserver(), &observerB]() {
+              if (**observer) {
+                return ***observerB;
+              }
+              return 42;
+            });
+
+        observerB = makeObserver([observerA]() { return **observerA; });
+
+        EXPECT_EQ(42, **observerA);
+        EXPECT_EQ(42, ***observerB);
+
+        observable.setValue(true);
+        folly::observer_detail::ObserverManager::waitForAllUpdates();
+      }(),
+      "Observer cycle detected.");
 }
 
 TEST(Observer, Stress) {
@@ -401,6 +373,55 @@ TEST(Observer, SetCallback) {
   observable.setValue(44);
   EXPECT_FALSE(baton.timed_wait(std::chrono::milliseconds{100}));
   EXPECT_EQ(43, callbackValue);
+  EXPECT_EQ(2, callbackCallsCount);
+}
+
+TEST(Observer, CallbackCalledOncePerSnapshot) {
+  SimpleObservable<folly::Unit> observable(folly::unit);
+  auto observer = observable.getObserver();
+
+  int value = 1;
+  SimpleObservable<int> intObservable(value);
+  auto squareObserver =
+      makeObserver([o = intObservable.getObserver()] { return **o * **o; });
+
+  folly::Baton baton;
+  size_t callbackCallsCount = 0;
+  auto callbackHandle = observer.addCallback([&](auto) {
+    // The main point of this test is that the callback depends on
+    // `squareObserver`. A refresh of `squareObserver` should not trigger the
+    // callback, since the callback is associated only with `observer`.
+    //
+    // Note that we do not guarantee that **squareObserver necessarily reflects
+    // the latest update.
+    EXPECT_GE(value * value, **squareObserver);
+
+    ++callbackCallsCount;
+    baton.post();
+  });
+
+  baton.wait();
+  baton.reset();
+  EXPECT_EQ(1, callbackCallsCount);
+
+  // Check that any second updates to squareObserver don't trigger the callback
+  // again
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(1, callbackCallsCount);
+
+  value = 2;
+  intObservable.setValue(value);
+  observable.setValue(folly::Unit{});
+
+  baton.wait();
+  baton.reset();
+  EXPECT_EQ(2, callbackCallsCount);
+
+  value = 3;
+  // Updating intObservable should not trigger the callback
+  intObservable.setValue(value);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(9, **squareObserver);
   EXPECT_EQ(2, callbackCallsCount);
 }
 

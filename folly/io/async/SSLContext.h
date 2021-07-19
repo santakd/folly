@@ -94,6 +94,7 @@ class SSLContext {
     SSLv3,
     TLSv1, // support TLS 1.0+
     TLSv1_2, // support for only TLS 1.2+
+    TLSv1_3,
   };
 
   /**
@@ -529,6 +530,15 @@ class SSLContext {
    */
   void unsetNextProtocols();
   void deleteNextProtocolsStrings();
+
+  bool getRequireAlpnIfClientSupports() const {
+    return requireAlpnIfClientSupports_;
+  }
+
+  void setRequireAlpnIfClientSupports(bool require) {
+    requireAlpnIfClientSupports_ = require;
+  }
+
 #endif // FOLLY_OPENSSL_HAS_ALPN
 
   /**
@@ -667,6 +677,8 @@ class SSLContext {
       void* data);
 
   size_t pickNextProtocols();
+
+  bool requireAlpnIfClientSupports_{false};
 
 #endif // FOLLY_OPENSSL_HAS_ALPN
 

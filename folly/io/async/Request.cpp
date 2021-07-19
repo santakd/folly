@@ -16,8 +16,7 @@
 
 #include <folly/io/async/Request.h>
 
-#include <glog/logging.h>
-
+#include <folly/GLog.h>
 #include <folly/MapUtil.h>
 #include <folly/SingletonThreadLocal.h>
 #include <folly/experimental/SingleWriterFixedHashMap.h>
@@ -243,9 +242,8 @@ bool RequestContext::State::doSetContextData(
     result = doSetContextDataHelper(token, data, behaviour, safe);
   }
   if (result.unexpected) {
-    LOG_FIRST_N(WARNING, 1)
-        << "Calling RequestContext::setContextData for "
-        << token.getDebugString() << " but it is already set";
+    FB_LOG_ONCE(WARNING) << "Calling RequestContext::setContextData for "
+                         << token.getDebugString() << " but it is already set";
   }
   if (result.replaced) {
     result.replaced->retire(); // Retire to hazptr library
@@ -376,7 +374,7 @@ RequestContext::State::insertNewData(
 FOLLY_ALWAYS_INLINE
 bool RequestContext::State::hasContextData(const RequestToken& token) const {
   hazptr_local<1> h;
-  Combined* combined = h[0].get_protected(combined_);
+  Combined* combined = h[0].protect(combined_);
   return combined ? combined->requestData_.contains(token) : false;
 }
 
@@ -384,7 +382,7 @@ FOLLY_ALWAYS_INLINE
 RequestData* FOLLY_NULLABLE
 RequestContext::State::getContextData(const RequestToken& token) {
   hazptr_local<1> h;
-  Combined* combined = h[0].get_protected(combined_);
+  Combined* combined = h[0].protect(combined_);
   if (!combined) {
     return nullptr;
   }
@@ -397,7 +395,7 @@ FOLLY_ALWAYS_INLINE
 const RequestData* FOLLY_NULLABLE
 RequestContext::State::getContextData(const RequestToken& token) const {
   hazptr_local<1> h;
-  Combined* combined = h[0].get_protected(combined_);
+  Combined* combined = h[0].protect(combined_);
   if (!combined) {
     return nullptr;
   }
@@ -409,8 +407,8 @@ RequestContext::State::getContextData(const RequestToken& token) const {
 FOLLY_ALWAYS_INLINE
 void RequestContext::State::onSet() {
   // Don't use hazptr_local because callback may use hazptr
-  hazptr_holder<> h;
-  Combined* combined = h.get_protected(combined_);
+  hazptr_holder<> h = make_hazard_pointer<>();
+  Combined* combined = h.protect(combined_);
   if (!combined) {
     return;
   }
@@ -423,8 +421,8 @@ void RequestContext::State::onSet() {
 FOLLY_ALWAYS_INLINE
 void RequestContext::State::onUnset() {
   // Don't use hazptr_local because callback may use hazptr
-  hazptr_holder<> h;
-  Combined* combined = h.get_protected(combined_);
+  hazptr_holder<> h = make_hazard_pointer<>();
+  Combined* combined = h.protect(combined_);
   if (!combined) {
     return;
   }
@@ -559,26 +557,26 @@ void RequestContext::clearContextData(const RequestToken& val) {
   auto newCtx = std::move(newCtx_); // enforce that it is really moved-from
 
   auto& staticCtx = getStaticContext();
-  if (newCtx == staticCtx.first) {
+  if (newCtx == staticCtx.requestContext) {
     return newCtx;
   }
 
   FOLLY_SDT(
       folly,
       request_context_switch_before,
-      staticCtx.first.get(),
+      staticCtx.requestContext.get(),
       newCtx.get(),
-      staticCtx.first ? staticCtx.first->getRootId() : 0,
+      staticCtx.requestContext ? staticCtx.requestContext->getRootId() : 0,
       newCtx ? newCtx->getRootId() : 0);
 
   std::shared_ptr<RequestContext> prevCtx;
-  RequestContext* curCtx = staticCtx.first.get();
+  RequestContext* curCtx = staticCtx.requestContext.get();
   bool checkCur = curCtx && curCtx->state_.combined();
   bool checkNew = newCtx && newCtx->state_.combined();
   if (checkCur && checkNew) {
-    hazptr_array<2> h;
-    auto curc = h[0].get_protected(curCtx->state_.combined_);
-    auto newc = h[1].get_protected(newCtx->state_.combined_);
+    hazptr_array<2> h = make_hazard_pointer_array<2>();
+    auto curc = h[0].protect(curCtx->state_.combined_);
+    auto newc = h[1].protect(newCtx->state_.combined_);
     auto& curcb = curc->callbackData_;
     auto& newcb = newc->callbackData_;
     for (auto it = curcb.begin(); it != curcb.end(); ++it) {
@@ -588,9 +586,10 @@ void RequestContext::clearContextData(const RequestToken& val) {
         data->onUnset();
       }
     }
-    prevCtx = std::move(staticCtx.first);
-    staticCtx.first = std::move(newCtx);
-    staticCtx.second.store(staticCtx.first->rootId_, std::memory_order_relaxed);
+    prevCtx = std::move(staticCtx.requestContext);
+    staticCtx.requestContext = std::move(newCtx);
+    staticCtx.rootId.store(
+        staticCtx.requestContext->getRootId(), std::memory_order_relaxed);
     for (auto it = newcb.begin(); it != newcb.end(); ++it) {
       DCHECK(it.key());
       auto data = it.key();
@@ -602,14 +601,14 @@ void RequestContext::clearContextData(const RequestToken& val) {
     if (curCtx) {
       curCtx->state_.onUnset();
     }
-    prevCtx = std::move(staticCtx.first);
-    staticCtx.first = std::move(newCtx);
-    if (staticCtx.first) {
-      staticCtx.second.store(
-          staticCtx.first->rootId_, std::memory_order_relaxed);
-      staticCtx.first->state_.onSet();
+    prevCtx = std::move(staticCtx.requestContext);
+    staticCtx.requestContext = std::move(newCtx);
+    if (staticCtx.requestContext) {
+      staticCtx.rootId.store(
+          staticCtx.requestContext->rootId_, std::memory_order_relaxed);
+      staticCtx.requestContext->state_.onSet();
     } else {
-      staticCtx.second.store(0, std::memory_order_relaxed);
+      staticCtx.rootId.store(0, std::memory_order_relaxed);
     }
   }
   return prevCtx;
@@ -625,7 +624,7 @@ RequestContext::getRootIdsFromAllThreads() {
   auto accessor = SingletonT::accessAllThreads();
   for (auto it = accessor.begin(); it != accessor.end(); ++it) {
     result.push_back(
-        {it->second.load(std::memory_order_relaxed),
+        {it->rootId.load(std::memory_order_relaxed),
          it.getThreadId(),
          it.getOSThreadId()});
   }
@@ -634,7 +633,7 @@ RequestContext::getRootIdsFromAllThreads() {
 
 /* static */ std::shared_ptr<RequestContext>
 RequestContext::setShallowCopyContext() {
-  auto& parent = getStaticContext().first;
+  auto& parent = getStaticContext().requestContext;
   auto child = parent ? RequestContext::copyAsChild(*parent)
                       : std::make_shared<RequestContext>();
   if (!parent) {
@@ -647,7 +646,7 @@ RequestContext::setShallowCopyContext() {
 }
 
 RequestContext* RequestContext::get() {
-  auto& context = getStaticContext().first;
+  auto& context = getStaticContext().requestContext;
   if (!context) {
     static RequestContext defaultContext(0);
     return std::addressof(defaultContext);

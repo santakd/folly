@@ -32,40 +32,7 @@
  * Note that you cannot use ASSERT macros in coro tests. See below for
  * CO_ASSERT_*.
  */
-#define CO_TEST_MASTER_(test_case_name, test_name, parent_class, parent_id) \
-  class GTEST_TEST_CLASS_NAME_(test_case_name, test_name)                   \
-      : public parent_class {                                               \
-   public:                                                                  \
-    GTEST_TEST_CLASS_NAME_(test_case_name, test_name)() {}                  \
-                                                                            \
-   private:                                                                 \
-    void TestBody() override;                                               \
-    folly::coro::Task<void> co_TestBody();                                  \
-    static ::testing::TestInfo* const test_info_ GTEST_ATTRIBUTE_UNUSED_;   \
-    GTEST_DISALLOW_COPY_AND_ASSIGN_(                                        \
-        GTEST_TEST_CLASS_NAME_(test_case_name, test_name));                 \
-  };                                                                        \
-                                                                            \
-  ::testing::TestInfo* const GTEST_TEST_CLASS_NAME_(                        \
-      test_case_name, test_name)::test_info_ =                              \
-      ::testing::internal::MakeAndRegisterTestInfo(                         \
-          GTEST_STRINGIFY_TOKEN_(test_case_name),                           \
-          GTEST_STRINGIFY_TOKEN_(test_name),                                \
-          NULL,                                                             \
-          NULL,                                                             \
-          ::testing::internal::CodeLocation(__FILE__, __LINE__),            \
-          (parent_id),                                                      \
-          parent_class::SetUpTestCase,                                      \
-          parent_class::TearDownTestCase,                                   \
-          new ::testing::internal::TestFactoryImpl<GTEST_TEST_CLASS_NAME_(  \
-              test_case_name, test_name)>);                                 \
-  void GTEST_TEST_CLASS_NAME_(test_case_name, test_name)::TestBody() {      \
-    folly::coro::blockingWait(co_TestBody());                               \
-  }                                                                         \
-  folly::coro::Task<void> GTEST_TEST_CLASS_NAME_(                           \
-      test_case_name, test_name)::co_TestBody()
-
-#define CO_TEST_20201023_(test_suite_name, test_name, parent_class, parent_id) \
+#define CO_TEST_(test_suite_name, test_name, parent_class, parent_id)          \
   static_assert(                                                               \
       sizeof(GTEST_STRINGIFY_(test_suite_name)) > 1,                           \
       "test_suite_name must not be empty");                                    \
@@ -108,12 +75,6 @@
   folly::coro::Task<void> GTEST_TEST_CLASS_NAME_(                              \
       test_suite_name, test_name)::co_TestBody()
 
-#if defined(TYPED_TEST_SUITE)
-#define CO_TEST_ CO_TEST_20201023_
-#else
-#define CO_TEST_ CO_TEST_MASTER_
-#endif
-
 /**
  * TEST() for coro tests.
  */
@@ -134,12 +95,51 @@
       test_fixture,                        \
       ::testing::internal::GetTypeId<test_fixture>())
 
+#define CO_TEST_P(test_suite_name, test_name)                                  \
+  class GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)                     \
+      : public test_suite_name {                                               \
+   public:                                                                     \
+    GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)() {}                    \
+    void TestBody() override;                                                  \
+    folly::coro::Task<void> co_TestBody();                                     \
+                                                                               \
+   private:                                                                    \
+    static int AddToRegistry() {                                               \
+      ::testing::UnitTest::GetInstance()                                       \
+          ->parameterized_test_registry()                                      \
+          .GetTestSuitePatternHolder<test_suite_name>(                         \
+              GTEST_STRINGIFY_(test_suite_name),                               \
+              ::testing::internal::CodeLocation(__FILE__, __LINE__))           \
+          ->AddTestPattern(                                                    \
+              GTEST_STRINGIFY_(test_suite_name),                               \
+              GTEST_STRINGIFY_(test_name),                                     \
+              new ::testing::internal::TestMetaFactory<GTEST_TEST_CLASS_NAME_( \
+                  test_suite_name, test_name)>(),                              \
+              ::testing::internal::CodeLocation(__FILE__, __LINE__));          \
+      return 0;                                                                \
+    }                                                                          \
+    static int gtest_registering_dummy_ GTEST_ATTRIBUTE_UNUSED_;               \
+    GTEST_DISALLOW_COPY_AND_ASSIGN_(                                           \
+        GTEST_TEST_CLASS_NAME_(test_suite_name, test_name));                   \
+  };                                                                           \
+  int GTEST_TEST_CLASS_NAME_(                                                  \
+      test_suite_name, test_name)::gtest_registering_dummy_ =                  \
+      GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)::AddToRegistry();     \
+  void GTEST_TEST_CLASS_NAME_(test_suite_name, test_name)::TestBody() {        \
+    folly::coro::blockingWait(co_TestBody());                                  \
+  }                                                                            \
+  folly::coro::Task<void> GTEST_TEST_CLASS_NAME_(                              \
+      test_suite_name, test_name)::co_TestBody()
+
 /**
  * Coroutine versions of GTests's Assertion predicate macros. Use these in place
  * of ASSERT_* in CO_TEST or coroutine functions.
  */
 #define CO_GTEST_FATAL_FAILURE_(message) \
   co_return GTEST_MESSAGE_(message, ::testing::TestPartResult::kFatalFailure)
+
+#define CO_ASSERT_PRED_FORMAT1(pred_format, v1) \
+  GTEST_PRED_FORMAT1_(pred_format, v1, CO_GTEST_FATAL_FAILURE_)
 #define CO_ASSERT_PRED_FORMAT2(pred_format, v1, v2) \
   GTEST_PRED_FORMAT2_(pred_format, v1, v2, CO_GTEST_FATAL_FAILURE_)
 
@@ -177,5 +177,11 @@
  * GTEST_FATAL_FAILURE_("Failed")
  */
 #define CO_FAIL() CO_GTEST_FATAL_FAILURE_("Failed")
+
+/**
+ * Coroutine version of SKIP() which is defined as GTEST_SKIP()
+ */
+#define CO_SKIP(message) \
+  co_return GTEST_MESSAGE_(message, ::testing::TestPartResult::kSkip)
 
 #endif // FOLLY_HAS_COROUTINES

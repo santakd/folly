@@ -129,8 +129,6 @@ class hazptr_domain {
   RetiredList untagged_;
   RetiredList tagged_[kNumShards];
   Atom<int> count_{0};
-  Obj* unprotected_; // List of unprotected objects being reclaimed
-  ObjList children_; // Children of unprotected objects being reclaimed
   Atom<uint64_t> due_time_{0};
   Atom<ExecFn> exec_fn_{nullptr};
   Atom<int> exec_backlog_{0};
@@ -218,6 +216,7 @@ class hazptr_domain {
       hazptr_obj_list<Atom>&, hazptr_domain<Atom>&) noexcept;
   friend void hazptr_domain_push_retired<Atom>(
       hazptr_obj_list<Atom>&, bool check, hazptr_domain<Atom>&) noexcept;
+  friend hazptr_holder<Atom> make_hazard_pointer<Atom>(hazptr_domain<Atom>&);
   friend class hazptr_holder<Atom>;
   friend class hazptr_obj<Atom>;
   friend class hazptr_obj_cohort<Atom>;
@@ -431,7 +430,7 @@ class hazptr_domain {
     });
     ObjList children;
     int count = nomatch.count();
-    reclaim_unprotected_unsafe(nomatch.head(), children);
+    reclaim_unprotected(nomatch.head(), children);
     count -= children.count();
     match.splice(children);
     List l(match.head(), match.tail());
@@ -489,17 +488,8 @@ class hazptr_domain {
     }
   }
 
-  /** reclaim_unprotected_safe */
-  void reclaim_unprotected_safe() {
-    while (unprotected_) {
-      auto obj = unprotected_;
-      unprotected_ = obj->next();
-      (*(obj->reclaim()))(obj, children_);
-    }
-  }
-
-  /** reclaim_unprotected_unsafe */
-  void reclaim_unprotected_unsafe(Obj* obj, ObjList& children) {
+  /** reclaim_unprotected */
+  void reclaim_unprotected(Obj* obj, ObjList& children) {
     while (obj) {
       auto next = obj->next();
       (*(obj->reclaim()))(obj, children);
@@ -794,6 +784,12 @@ FOLLY_ALWAYS_INLINE hazptr_domain<Atom>& default_hazptr_domain() {
   return hazptr_default_domain_helper<Atom>::get();
 }
 
+template <template <typename> class Atom>
+FOLLY_ALWAYS_INLINE hazard_pointer_domain<Atom>&
+hazard_pointer_default_domain() {
+  return default_hazptr_domain<Atom>();
+}
+
 /** hazptr_domain_push_retired: push a list of retired objects into a domain */
 template <template <typename> class Atom>
 void hazptr_domain_push_retired(
@@ -820,6 +816,11 @@ FOLLY_ALWAYS_INLINE void hazptr_retire(T* obj, D reclaim) {
 template <template <typename> class Atom>
 void hazptr_cleanup(hazptr_domain<Atom>& domain) noexcept {
   domain.cleanup();
+}
+
+template <template <typename> class Atom>
+void hazard_pointer_clean_up(hazard_pointer_domain<Atom>& domain) noexcept {
+  hazptr_cleanup(domain);
 }
 
 } // namespace folly

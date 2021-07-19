@@ -36,6 +36,30 @@
 #include <folly/memory/Malloc.h>
 #include <folly/memory/SanitizeAddress.h>
 
+/*
+ * Callbacks that will be invoked when IOBuf allocates or frees memory.
+ * Note that io_buf_alloc_cb() will also be invoked when IOBuf takes ownership
+ * of a malloc-allocated buffer, even if it was allocated earlier by another
+ * part of the code.
+ *
+ * By default these are unimplemented, but programs can define these functions
+ * to perform their own custom logic on memory allocation.  This is intended
+ * primarily to help programs track memory usage and possibly take action
+ * when thresholds are hit.  Callers should generally avoid performing any
+ * expensive work in these callbacks, since they may be called from arbitrary
+ * locations in the code that use IOBuf, possibly while holding locks.
+ */
+
+#if FOLLY_HAVE_WEAK_SYMBOLS
+FOLLY_ATTR_WEAK void io_buf_alloc_cb(void* /*ptr*/, size_t /*size*/) noexcept;
+FOLLY_ATTR_WEAK void io_buf_free_cb(void* /*ptr*/, size_t /*size*/) noexcept;
+#else
+static void (*io_buf_alloc_cb)(void* /*ptr*/, size_t /*size*/) noexcept =
+    nullptr;
+static void (*io_buf_free_cb)(void* /*ptr*/, size_t /*size*/) noexcept =
+    nullptr;
+#endif
+
 using std::unique_ptr;
 
 namespace {
@@ -167,6 +191,11 @@ void* IOBuf::operator new(size_t size) {
   auto storage = static_cast<HeapStorage*>(checkedMalloc(fullSize));
 
   new (&storage->prefix) HeapPrefix(kIOBufInUse, fullSize);
+
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, fullSize);
+  }
+
   return &(storage->buf);
 }
 
@@ -203,6 +232,9 @@ void IOBuf::releaseStorage(HeapStorage* storage, uint16_t freeFlags) noexcept {
       // The storage space is now unused.  Free it.
       storage->prefix.HeapPrefix::~HeapPrefix();
       if (FOLLY_LIKELY(size)) {
+        if (io_buf_free_cb) {
+          io_buf_free_cb(storage, size);
+        }
         sizedFree(storage, size);
       } else {
         free(storage);
@@ -288,7 +320,7 @@ unique_ptr<IOBuf> IOBuf::create(std::size_t capacity) {
     // if we do not have space for the overhead, allocate the mem separateley
     if (mallocSize < minSize) {
       auto* buf = checkedMalloc(mallocSize);
-      return takeOwnership(buf, mallocSize, static_cast<size_t>(0));
+      return takeOwnership(SIZED_FREE, buf, mallocSize, 0, 0);
     }
   }
 
@@ -304,6 +336,10 @@ unique_ptr<IOBuf> IOBuf::createCombined(std::size_t capacity) {
 
   new (&storage->hs.prefix) HeapPrefix(kIOBufInUse | kDataInUse, mallocSize);
   new (&storage->shared) SharedInfo(freeInternalBuf, storage);
+
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, mallocSize);
+  }
 
   auto bufAddr = reinterpret_cast<uint8_t*>(&storage->align);
   uint8_t* storageEnd = reinterpret_cast<uint8_t*>(storage) + mallocSize;
@@ -384,6 +420,33 @@ IOBuf::IOBuf(
   rollback.dismiss();
 }
 
+IOBuf::IOBuf(
+    TakeOwnershipOp,
+    SizedFree,
+    void* buf,
+    std::size_t capacity,
+    std::size_t offset,
+    std::size_t length,
+    bool freeOnError)
+    : next_(this),
+      prev_(this),
+      data_(static_cast<uint8_t*>(buf) + offset),
+      buf_(static_cast<uint8_t*>(buf)),
+      length_(length),
+      capacity_(capacity),
+      flagsAndSharedInfo_(
+          packFlagsAndSharedInfo(kFlagFreeSharedInfo, nullptr)) {
+  auto rollback = makeGuard([&] { //
+    takeOwnershipError(freeOnError, buf, nullptr, nullptr);
+  });
+  setSharedInfo(new SharedInfo(nullptr, reinterpret_cast<void*>(capacity)));
+  rollback.dismiss();
+
+  if (io_buf_alloc_cb && capacity) {
+    io_buf_alloc_cb(buf, capacity);
+  }
+}
+
 unique_ptr<IOBuf> IOBuf::takeOwnership(
     void* buf,
     std::size_t capacity,
@@ -391,10 +454,14 @@ unique_ptr<IOBuf> IOBuf::takeOwnership(
     std::size_t length,
     FreeFunction freeFn,
     void* userData,
-    bool freeOnError) {
+    bool freeOnError,
+    TakeOwnershipOption option) {
   // do not allow only user data without a freeFn
   // since we use that for folly::sizedFree
-  DCHECK(!userData || (userData && freeFn));
+
+  DCHECK(
+      !userData || (userData && freeFn) ||
+      (userData && !freeFn && (option == TakeOwnershipOption::STORE_SIZE)));
 
   HeapFullStorage* storage = nullptr;
   auto rollback = makeGuard([&] {
@@ -422,6 +489,16 @@ unique_ptr<IOBuf> IOBuf::takeOwnership(
       length));
 
   rollback.dismiss();
+
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, mallocSize);
+    if (userData && !freeFn && (option == TakeOwnershipOption::STORE_SIZE)) {
+      // Even though we did not allocate the buffer, call io_buf_alloc_cb()
+      // since we will call io_buf_free_cb() on destruction, and we want these
+      // calls to be 1:1.
+      io_buf_alloc_cb(buf, capacity);
+    }
+  }
 
   return result;
 }
@@ -597,6 +674,14 @@ std::size_t IOBuf::computeChainDataLength() const {
     fullLength += current->length_;
   }
   return fullLength;
+}
+
+std::size_t IOBuf::computeChainCapacity() const {
+  std::size_t fullCapacity = capacity_;
+  for (IOBuf* current = next_; current != this; current = current->next_) {
+    fullCapacity += current->capacity_;
+  }
+  return fullCapacity;
 }
 
 void IOBuf::prependChain(unique_ptr<IOBuf>&& iobuf) {
@@ -974,10 +1059,16 @@ void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
         void* p = buf_;
         if (allocatedCapacity >= jemallocMinInPlaceExpandable) {
           if (xallocx(p, newAllocatedCapacity, 0, 0) == newAllocatedCapacity) {
+            if (io_buf_free_cb) {
+              io_buf_free_cb(p, reinterpret_cast<size_t>(info->userData));
+            }
             newBuffer = static_cast<uint8_t*>(p);
             newHeadroom = oldHeadroom;
             // update the userData
             info->userData = reinterpret_cast<void*>(newAllocatedCapacity);
+            if (io_buf_alloc_cb) {
+              io_buf_alloc_cb(newBuffer, newAllocatedCapacity);
+            }
           }
           // if xallocx failed, do nothing, fall back to malloc/memcpy/free
         }
@@ -1046,6 +1137,9 @@ void IOBuf::freeExtBuffer() noexcept {
     // this will invoke free if info->userData is 0
     size_t size = reinterpret_cast<size_t>(info->userData);
     if (size) {
+      if (io_buf_free_cb) {
+        io_buf_free_cb(buf_, size);
+      }
       folly::sizedFree(buf_, size);
     } else {
       free(buf_);
@@ -1071,6 +1165,9 @@ void IOBuf::allocExtBuffer(
   // the userData and the freeFn are nullptr here
   // just store the mallocSize in userData
   (*infoReturn)->userData = reinterpret_cast<void*>(mallocSize);
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(buf, mallocSize);
+  }
 
   *bufReturn = buf;
 }
@@ -1144,6 +1241,11 @@ fbstring IOBuf::moveToFbString() {
       length(),
       capacity(),
       AcquireMallocatedString());
+
+  if (io_buf_free_cb && sharedInfo() && sharedInfo()->userData) {
+    io_buf_free_cb(
+        writableData(), reinterpret_cast<size_t>(sharedInfo()->userData));
+  }
 
   SharedInfo::invokeAndDeleteEachObserver(
       observerListHead, [](auto& entry) { entry.afterReleaseExtBuffer(); });

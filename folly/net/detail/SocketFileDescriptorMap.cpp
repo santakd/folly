@@ -146,7 +146,7 @@ int SocketFileDescriptorMap::socketToFd(SOCKET sock) noexcept {
 } // namespace netops
 } // namespace folly
 
-#elif defined(__XROS__)
+#elif defined(__XROS__) || defined(__EMSCRIPTEN__)
 
 // Stub this out for now.
 #include <stdexcept>
@@ -156,19 +156,19 @@ namespace netops {
 namespace detail {
 
 int SocketFileDescriptorMap::close(int fd) noexcept {
-  throw std::logic_error("Not implemented!");
+  std::terminate();
 }
 
 int SocketFileDescriptorMap::close(void* sock) noexcept {
-  throw std::logic_error("Not implemented!");
+  std::terminate();
 }
 
 void* SocketFileDescriptorMap::fdToSocket(int fd) noexcept {
-  throw std::logic_error("Not implemented!");
+  std::terminate();
 }
 
 int SocketFileDescriptorMap::socketToFd(void* sock) noexcept {
-  throw std::logic_error("Not implemented!");
+  std::terminate();
 }
 
 } // namespace detail

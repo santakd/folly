@@ -185,6 +185,12 @@ class MakeBuilder(BuilderBase):
         self._run_cmd(cmd, env=env)
 
 
+class CMakeBootStrapBuilder(MakeBuilder):
+    def _build(self, install_dirs, reconfigure):
+        self._run_cmd(["./bootstrap", "--prefix=" + self.inst_dir])
+        super(CMakeBootStrapBuilder, self)._build(install_dirs, reconfigure)
+
+
 class AutoconfBuilder(BuilderBase):
     def __init__(self, build_opts, ctx, manifest, src_dir, build_dir, inst_dir, args):
         super(AutoconfBuilder, self).__init__(
@@ -720,7 +726,8 @@ if __name__ == "__main__":
             if platform == "win32":
                 machine_suffix = self.build_opts.host_type.as_tuple_string()
                 testpilot_args = [
-                    testpilot,
+                    "parexec-testinfra.exe",
+                    "C:/tools/testpilot/sc_testpilot.par",
                     # Need to force the repo type otherwise testpilot on windows
                     # can be confused (presumably sparse profile related)
                     "--force-repo",
@@ -734,7 +741,7 @@ if __name__ == "__main__":
                     "--test-config",
                     "platform=%s" % machine_suffix,
                     "buildsystem=getdeps",
-                    "--print-long-results",
+                    "--return-nonzero-on-failures",
                 ]
             else:
                 testpilot_args = [
@@ -746,12 +753,15 @@ if __name__ == "__main__":
                     "--print-long-results",
                 ]
 
+            if owner:
+                testpilot_args += ["--contacts", owner]
+
             if tpx and env:
                 testpilot_args.append("--env")
                 testpilot_args.extend(f"{key}={val}" for key, val in env.items())
 
-            if owner:
-                testpilot_args += ["--contacts", owner]
+            if test_filter:
+                testpilot_args += ["--", test_filter]
 
             if schedule_type == "continuous":
                 runs.append(
@@ -790,9 +800,6 @@ if __name__ == "__main__":
                 )
             else:
                 runs.append(["--collection", "oss-diff", "--purpose", "diff"])
-
-            if test_filter:
-                testpilot_args += [test_filter]
 
             for run in runs:
                 self._run_cmd(
@@ -868,7 +875,9 @@ class OpenSSLBuilder(BuilderBase):
             args = ["darwin64-x86_64-cc"]
         elif self.build_opts.is_linux():
             make = "make"
-            args = ["linux-x86_64"]
+            args = (
+                ["linux-x86_64"] if not self.build_opts.is_arm() else ["linux-aarch64"]
+            )
         else:
             raise Exception("don't know how to build openssl for %r" % self.ctx)
 

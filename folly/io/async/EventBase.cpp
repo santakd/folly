@@ -31,6 +31,7 @@
 #include <folly/String.h>
 #include <folly/io/async/EventBaseAtomicNotificationQueue.h>
 #include <folly/io/async/EventBaseBackendBase.h>
+#include <folly/io/async/EventBaseLocal.h>
 #include <folly/io/async/VirtualEventBase.h>
 #include <folly/portability/Unistd.h>
 #include <folly/synchronization/Baton.h>
@@ -204,14 +205,35 @@ EventBase::~EventBase() {
   // Stop consumer before deleting NotificationQueue
   queue_->stopConsuming();
 
-  for (auto storage : localStorageToDtor_) {
-    storage->onEventBaseDestruction(*this);
+  // Remove self from all registered EventBaseLocal instances.
+  // Notice that we could be racing with EventBaseLocal dtor similarly
+  // deregistering itself from all registered EventBase instances. Because
+  // both sides need to acquire two locks, but in inverse order, we retry if
+  // inner lock acquisition fails to prevent lock inversion deadlock.
+  while (true) {
+    auto locked = localStorageToDtor_.wlock();
+    if (locked->empty()) {
+      break;
+    }
+    auto evbl = *locked->begin();
+    if (evbl->tryDeregister(*this)) {
+      locked->erase(evbl);
+    }
   }
   localStorage_.clear();
 
   evb_.reset();
 
   VLOG(5) << "EventBase(): Destroyed.";
+}
+
+bool EventBase::tryDeregister(detail::EventBaseLocalBase& evbl) {
+  if (auto locked = localStorageToDtor_.tryWLock()) {
+    locked->erase(&evbl);
+    runInEventBaseThread([this, key = evbl.key_] { localStorage_.erase(key); });
+    return true;
+  }
+  return false;
 }
 
 std::unique_ptr<EventBaseBackendBase> EventBase::getDefaultBackend() {
@@ -522,6 +544,8 @@ void EventBase::bumpHandlingTime() {
 void EventBase::terminateLoopSoon() {
   VLOG(5) << "EventBase(): Received terminateLoopSoon() command.";
 
+  auto keepAlive = getKeepAliveToken(this);
+
   // Set stop to true, so the event loop will know to exit.
   stop_.store(true, std::memory_order_relaxed);
 
@@ -531,7 +555,7 @@ void EventBase::terminateLoopSoon() {
   // receives another event.  Send an empty frame to the notification queue
   // so that the event loop will wake up even if there are no other events.
   try {
-    queue_->putMessage([&] { evb_->eb_event_base_loopbreak(); });
+    queue_->putMessage([] {});
   } catch (...) {
     // putMessage() can only fail when the queue is draining in ~EventBase.
   }

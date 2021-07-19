@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#include <utility>
+
+#include <folly/CancellationToken.h>
 #include <folly/ExceptionWrapper.h>
 #include <folly/experimental/coro/AsyncPipe.h>
 #include <folly/experimental/coro/AsyncScope.h>
@@ -59,8 +62,6 @@ BarrierTask makeCollectAllTryTask(
           co_withCancellation(
               cancelToken, static_cast<SemiAwaitable&&>(awaitable))));
     }
-  } catch (const std::exception& ex) {
-    result.emplaceException(std::current_exception(), ex);
   } catch (...) {
     result.emplaceException(std::current_exception());
   }
@@ -152,12 +153,6 @@ auto collectAllImpl(
               executor.get_alias(),
               co_withCancellation(
                   cancelToken, static_cast<decltype(awaitable)>(awaitable))));
-        }
-      } catch (const std::exception& ex) {
-        anyFailures.store(true, std::memory_order_relaxed);
-        if (!cancelSource.requestCancellation()) {
-          // This was the first failure, remember it's error.
-          firstException = exception_wrapper{std::current_exception(), ex};
         }
       } catch (...) {
         anyFailures.store(true, std::memory_order_relaxed);
@@ -284,6 +279,65 @@ auto makeUnorderedAsyncGeneratorFromAwaitableRangeImpl(
   }(scope, std::move(awaitables));
 }
 
+template <typename... SemiAwaitables, size_t... Indices>
+auto collectAnyImpl(
+    std::index_sequence<Indices...>, SemiAwaitables&&... awaitables)
+    -> folly::coro::Task<std::pair<
+        std::size_t,
+        folly::Try<collect_any_component_t<SemiAwaitables...>>>> {
+  const CancellationToken& parentCancelToken =
+      co_await co_current_cancellation_token;
+  const CancellationSource cancelSource;
+  const CancellationToken cancelToken =
+      CancellationToken::merge(parentCancelToken, cancelSource.getToken());
+
+  std::pair<std::size_t, folly::Try<collect_any_component_t<SemiAwaitables...>>>
+      firstCompletion;
+  firstCompletion.first = size_t(-1);
+  co_await folly::coro::collectAll(folly::coro::co_withCancellation(
+      cancelToken,
+      folly::coro::co_invoke(
+          [&, aw = static_cast<SemiAwaitables&&>(awaitables)]() mutable
+          -> folly::coro::Task<void> {
+            auto result = co_await folly::coro::co_awaitTry(
+                static_cast<SemiAwaitables&&>(aw));
+            if (!cancelSource.requestCancellation()) {
+              // This is first entity to request cancellation.
+              firstCompletion.first = Indices;
+              firstCompletion.second = std::move(result);
+            }
+          }))...);
+
+  if (parentCancelToken.isCancellationRequested()) {
+    co_yield co_cancelled;
+  }
+
+  co_return firstCompletion;
+}
+
+template <typename... SemiAwaitables, size_t... Indices>
+auto collectAnyNoDiscardImpl(
+    std::index_sequence<Indices...>, SemiAwaitables&&... awaitables)
+    -> folly::coro::Task<
+        std::tuple<collect_all_try_component_t<SemiAwaitables>...>> {
+  const CancellationToken& parentCancelToken =
+      co_await co_current_cancellation_token;
+  const CancellationSource cancelSource;
+  const CancellationToken cancelToken =
+      CancellationToken::merge(parentCancelToken, cancelSource.getToken());
+
+  std::tuple<collect_all_try_component_t<SemiAwaitables>...> results;
+  co_await folly::coro::collectAll(folly::coro::co_withCancellation(
+      cancelToken, folly::coro::co_invoke([&]() -> folly::coro::Task<void> {
+        auto result = co_await folly::coro::co_awaitTry(
+            std::forward<SemiAwaitables>(awaitables));
+        cancelSource.requestCancellation();
+        std::get<Indices>(results) = std::move(result);
+      }))...);
+
+  co_return results;
+}
+
 } // namespace detail
 
 template <typename... SemiAwaitables>
@@ -336,11 +390,6 @@ auto collectAllRange(InputRange awaitables)
       tryResults[index].emplace(co_await co_viaIfAsync(
           executor.get_alias(),
           co_withCancellation(cancelToken, std::move(semiAwaitable))));
-    } catch (const std::exception& ex) {
-      anyFailures.store(true, std::memory_order_relaxed);
-      if (!cancelSource.requestCancellation()) {
-        firstException = exception_wrapper{std::current_exception(), ex};
-      }
     } catch (...) {
       anyFailures.store(true, std::memory_order_relaxed);
       if (!cancelSource.requestCancellation()) {
@@ -427,11 +476,6 @@ auto collectAllRange(InputRange awaitables) -> folly::coro::Task<void> {
       co_await co_viaIfAsync(
           executor.get_alias(),
           co_withCancellation(cancelToken, std::move(semiAwaitable)));
-    } catch (const std::exception& ex) {
-      anyFailures.store(true, std::memory_order_relaxed);
-      if (!cancelSource.requestCancellation()) {
-        firstException = exception_wrapper{std::current_exception(), ex};
-      }
     } catch (...) {
       anyFailures.store(true, std::memory_order_relaxed);
       if (!cancelSource.requestCancellation()) {
@@ -507,12 +551,6 @@ auto collectAllTryRange(InputRange awaitables)
             executor.get_alias(),
             co_withCancellation(cancelToken, std::move(semiAwaitable))));
       }
-// This causes "Instruction does not dominate all uses!" internal compiler
-// error on Windows with Clang.
-#if !(defined(_WIN32) && defined(__clang__))
-    } catch (const std::exception& ex) {
-      result.emplaceException(std::current_exception(), ex);
-#endif
     } catch (...) {
       result.emplaceException(std::current_exception());
     }
@@ -605,9 +643,6 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
       try {
         awaitable.emplace(*iter);
         ++iter;
-      } catch (const std::exception& ex) {
-        iterationException = exception_wrapper{std::current_exception(), ex};
-        cancelSource.requestCancellation();
       } catch (...) {
         iterationException = exception_wrapper{std::current_exception()};
         cancelSource.requestCancellation();
@@ -623,8 +658,6 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
         co_await co_viaIfAsync(
             executor.get_alias(),
             co_withCancellation(cancelToken, std::move(*awaitable)));
-      } catch (const std::exception& ex) {
-        trySetFirstException(exception_wrapper{std::current_exception(), ex});
       } catch (...) {
         trySetFirstException(exception_wrapper{std::current_exception()});
       }
@@ -665,11 +698,6 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
       RequestContext::setContext(context);
 
       lock = co_await mutex.co_scoped_lock();
-    }
-  } catch (const std::exception& ex) {
-    // Only a fatal error if we failed to create any worker tasks.
-    if (workerTasks.empty()) {
-      iterationException = exception_wrapper{std::current_exception(), ex};
     }
   } catch (...) {
     if (workerTasks.empty()) {
@@ -745,9 +773,6 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
         tryResults.emplace_back();
         awaitable.emplace(*iter);
         ++iter;
-      } catch (const std::exception& ex) {
-        iterationException = exception_wrapper{std::current_exception(), ex};
-        cancelSource.requestCancellation();
       } catch (...) {
         iterationException = exception_wrapper{std::current_exception()};
         cancelSource.requestCancellation();
@@ -768,8 +793,6 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
             executor.get_alias(),
             co_withCancellation(
                 cancelToken, static_cast<awaitable_t&&>(*awaitable))));
-      } catch (const std::exception& ex) {
-        trySetFirstException(exception_wrapper{std::current_exception(), ex});
       } catch (...) {
         trySetFirstException(exception_wrapper{std::current_exception()});
       }
@@ -779,8 +802,6 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       try {
         tryResults[thisIndex] = std::move(tryResult);
-      } catch (const std::exception& ex) {
-        trySetFirstException(exception_wrapper{std::current_exception(), ex});
       } catch (...) {
         trySetFirstException(exception_wrapper{std::current_exception()});
       }
@@ -821,14 +842,10 @@ auto collectAllWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       lock = co_await mutex.co_scoped_lock();
     }
-  } catch (const std::exception& ex) {
+  } catch (...) {
     // Only a fatal error if we failed to create any worker tasks.
     if (workerTasks.empty()) {
       // No need to synchronise here. There are no concurrent tasks running.
-      iterationException = exception_wrapper{std::current_exception(), ex};
-    }
-  } catch (...) {
-    if (workerTasks.empty()) {
       iterationException = exception_wrapper{std::current_exception()};
     }
   }
@@ -896,8 +913,6 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
         results.emplace_back();
         awaitable.emplace(*iter);
         ++iter;
-      } catch (const std::exception& ex) {
-        iterationException = exception_wrapper{std::current_exception(), ex};
       } catch (...) {
         iterationException = exception_wrapper{std::current_exception()};
       }
@@ -923,8 +938,6 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
               executor.get_alias(),
               co_withCancellation(cancelToken, std::move(*awaitable))));
         }
-      } catch (const std::exception& ex) {
-        result.emplaceException(std::current_exception(), ex);
       } catch (...) {
         result.emplaceException(std::current_exception());
       }
@@ -934,8 +947,6 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       try {
         results[thisIndex] = std::move(result);
-      } catch (const std::exception& ex) {
-        results[thisIndex].emplaceException(std::current_exception(), ex);
       } catch (...) {
         results[thisIndex].emplaceException(std::current_exception());
       }
@@ -973,14 +984,10 @@ auto collectAllTryWindowed(InputRange awaitables, std::size_t maxConcurrency)
 
       lock = co_await mutex.co_scoped_lock();
     }
-  } catch (const std::exception& ex) {
+  } catch (...) {
     // Failure to create a worker is an error if we failed
     // to create _any_ workers. As long as we created one then
     // the algorithm should still be able to make forward progress.
-    if (workerTasks.empty()) {
-      iterationException = exception_wrapper{std::current_exception(), ex};
-    }
-  } catch (...) {
     if (workerTasks.empty()) {
       iterationException = exception_wrapper{std::current_exception()};
     }
@@ -1013,6 +1020,28 @@ auto makeUnorderedAsyncGeneratorFromAwaitableTryRange(
         true>&&> {
   return detail::makeUnorderedAsyncGeneratorFromAwaitableRangeImpl(
       scope, std::move(awaitables), bool_constant<true>{});
+}
+
+template <typename SemiAwaitable, typename... SemiAwaitables>
+auto collectAny(SemiAwaitable&& awaitable, SemiAwaitables&&... awaitables)
+    -> folly::coro::Task<std::pair<
+        std::size_t,
+        folly::Try<detail::collect_any_component_t<
+            SemiAwaitable,
+            SemiAwaitables...>>>> {
+  return detail::collectAnyImpl(
+      std::make_index_sequence<sizeof...(SemiAwaitables) + 1>{},
+      static_cast<SemiAwaitable&&>(awaitable),
+      static_cast<SemiAwaitables&&>(awaitables)...);
+}
+
+template <typename... SemiAwaitables>
+auto collectAnyNoDiscard(SemiAwaitables&&... awaitables)
+    -> folly::coro::Task<std::tuple<detail::collect_all_try_component_t<
+        remove_cvref_t<SemiAwaitables>>...>> {
+  return detail::collectAnyNoDiscardImpl(
+      std::make_index_sequence<sizeof...(SemiAwaitables)>{},
+      static_cast<SemiAwaitables&&>(awaitables)...);
 }
 
 } // namespace coro
